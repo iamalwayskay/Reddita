@@ -5,12 +5,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import random
 import re
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .contract import canonical_reddit_thread_id, normalize_reddit_web_request
-from .models import CaptureEnvelope, CaptureGap, CapturePage, CaptureRecord, SourceResult
+from .models import (
+    CaptureEnvelope, CaptureGap, CapturePage, CaptureRecord, SourceResult,
+    source_slice_digest,
+)
 from .modern_dom import parse_about_dom, parse_listing_dom, parse_thread_dom
 from .reddit_json import (
     extract_more_children_json, extract_more_children_response_json,
@@ -18,9 +22,11 @@ from .reddit_json import (
     parse_morechildren_json, parse_thread_json,
 )
 from .scraper import (
-    MAX_HTML_BYTES, RedditCapture, RedditCaptureError, RedditParameters,
-    _canonical_json, _open_browser_context, _result_digest, acquire_reddit,
+    MAX_HTML_BYTES, RedditCache, RedditCapture, RedditCaptureError, RedditParameters,
+    _cacheable_capture, _canonical_json, _load_cached_capture, _open_browser_context,
+    _result_digest, _write_cache_optional, acquire_reddit,
 )
+from .retry import retry_delay
 from .session import (
     AccessMode, ProfileInUseError, ProfileLock, SessionState,
     classify_me_response, probe_session, profile_paths,
@@ -76,7 +82,7 @@ def _validate_landing(expected: str, actual: str) -> None:
 
 def _page_fetch(
     page, url: str, *, maximum_bytes: int = MAX_HTML_BYTES, timeout_ms: int = 30_000,
-) -> tuple[int, str]:
+) -> tuple[int, str, str | None, int]:
     parsed = urlsplit(url)
     if parsed.scheme != "https" or parsed.hostname != "www.reddit.com":
         raise RedditCaptureError("request-denied", "Reddit web fetch must stay on the standard domain")
@@ -92,7 +98,8 @@ def _page_fetch(
                   credentials: 'include', headers: {accept: 'application/json'},
                   signal: controller.signal
                 });
-                if (!response.body) return {status: response.status, text: '', tooLarge: false};
+                const retryAfter = response.headers.get('retry-after');
+                if (!response.body) return {status: response.status, text: '', length: 0, tooLarge: false, retryAfter};
                 const reader = response.body.getReader();
                 const chunks = [];
                 let length = 0;
@@ -102,14 +109,14 @@ def _page_fetch(
                   length += value.byteLength;
                   if (length > maximum) {
                     controller.abort();
-                    return {status: response.status, text: '', tooLarge: true};
+                    return {status: response.status, text: '', length, tooLarge: true, retryAfter};
                   }
                   chunks.push(value);
                 }
                 const combined = new Uint8Array(length);
                 let offset = 0;
                 for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.byteLength; }
-                return {status: response.status, text: new TextDecoder().decode(combined), tooLarge: false};
+                return {status: response.status, text: new TextDecoder().decode(combined), length, tooLarge: false, retryAfter};
               } catch (error) {
                 if (timedOut) return {status: 0, text: '', timedOut: true};
                 throw error;
@@ -126,9 +133,15 @@ def _page_fetch(
     if result.get("timedOut"):
         raise RedditCaptureError("timeout", "Reddit in-page fetch exceeded its time budget")
     text = result.get("text")
-    if result.get("tooLarge") or not isinstance(text, str) or len(text.encode("utf-8")) > maximum_bytes:
+    length = result.get("length")
+    if (result.get("tooLarge") or type(length) is not int or length < 0
+            or length > maximum_bytes or not isinstance(text, str)
+            or len(text.encode("utf-8")) > maximum_bytes):
         raise RedditCaptureError("network-byte-limit", "Reddit in-page response exceeded its byte limit")
-    return result["status"], text
+    retry_after = result.get("retryAfter")
+    if retry_after is not None and not isinstance(retry_after, str):
+        raise RedditCaptureError("browser-failed", "Reddit returned an invalid Retry-After header")
+    return result["status"], text, retry_after, length
 
 
 def _stable_content(page) -> str:
@@ -208,7 +221,7 @@ def _expand_more_comments(fetch, payload: str, thread_id: str, remaining: int):
                     seen_children.add(child_id)
                     identifiers.append(child_id)
         except RedditCaptureError as error:
-            if error.code in {"timeout", "request-limit", "network-byte-limit", "execution-cancelled"}:
+            if error.code in {"timeout", "request-limit", "network-byte-limit", "execution-cancelled", "rate-limited", "upstream-unavailable"}:
                 raise
             incomplete = True
             break
@@ -268,6 +281,8 @@ def capture_web_context(
     max_requests = int(getattr(budgets, "max_requests", 100))
     max_network_bytes = int(getattr(budgets, "max_network_bytes", 100_000_000))
     route_limit_hit = False
+    fetch_count = 0
+    managed_fetch_urls: set[str] = set()
 
     def check_budget() -> None:
         if cancelled and cancelled():
@@ -280,18 +295,51 @@ def capture_web_context(
             raise RedditCaptureError("network-byte-limit", "Reddit web capture exceeded its byte budget")
 
     def fetch(url: str) -> tuple[int, str]:
-        check_budget()
-        ledger["requests"] += 1
-        remaining_bytes = max_network_bytes - ledger["bytes"]
-        if remaining_bytes <= 0:
-            raise RedditCaptureError("network-byte-limit", "Reddit web capture exceeded its byte budget")
-        remaining_ms = max(1, int((timeout_seconds - (time.monotonic() - ledger["started"])) * 1000))
-        status, body = _page_fetch(
-            page, url, maximum_bytes=min(MAX_HTML_BYTES, remaining_bytes),
-            timeout_ms=remaining_ms,
-        )
-        check_budget()
-        return status, body
+        nonlocal fetch_count
+        if fetch_count:
+            delay = random.uniform(1.0, 2.5)
+            remaining = timeout_seconds - (time.monotonic() - ledger["started"])
+            if delay >= remaining:
+                raise RedditCaptureError("timeout", "Reddit web capture exceeded its time budget")
+            waiter = getattr(page, "wait_for_timeout", None)
+            if callable(waiter):
+                waiter(int(delay * 1000))
+            else:
+                time.sleep(delay)
+            check_budget()
+        fetch_count += 1
+        for attempt in range(3):
+            check_budget()
+            ledger["requests"] += 1
+            remaining_bytes = max_network_bytes - ledger["bytes"]
+            if remaining_bytes <= 0:
+                raise RedditCaptureError("network-byte-limit", "Reddit web capture exceeded its byte budget")
+            remaining = timeout_seconds - (time.monotonic() - ledger["started"])
+            managed_fetch_urls.add(url)
+            status, body, retry_after, response_bytes = _page_fetch(
+                page, url, maximum_bytes=min(MAX_HTML_BYTES, remaining_bytes),
+                timeout_ms=max(1, int(remaining * 1000)),
+            )
+            ledger["bytes"] += response_bytes
+            check_budget()
+            delay = retry_delay(status, retry_after, attempt)
+            if delay is None:
+                return status, body
+            if attempt == 2:
+                code = "rate-limited" if status == 429 else "upstream-unavailable"
+                raise RedditCaptureError(code, f"Reddit repeatedly returned HTTP {status} for {url}")
+            remaining = timeout_seconds - (time.monotonic() - ledger["started"])
+            if delay >= remaining:
+                raise RedditCaptureError(
+                    "rate-limited", "Reddit's Retry-After delay exceeds this capture's remaining time budget",
+                )
+            waiter = getattr(page, "wait_for_timeout", None)
+            if callable(waiter):
+                waiter(max(1, int(delay * 1000)))
+            else:
+                time.sleep(delay)
+            check_budget()
+        raise AssertionError("retry loop exhausted")
 
     route = getattr(page, "route", None)
     if callable(route):
@@ -316,6 +364,8 @@ def capture_web_context(
     if callable(on):
         def charge_finished_request(request):
             try:
+                if request.url in managed_fetch_urls:
+                    return
                 response = request.response()
                 if response is not None:
                     ledger["bytes"] += len(response.body())
@@ -332,25 +382,30 @@ def capture_web_context(
     for _page_index in range(request.max_pages):
         check_budget()
         page_url = _with_after(initial_page_url, after)
-        remaining_ms = max(1, int((timeout_seconds - (time.monotonic() - ledger["started"])) * 1000))
-        response = page.goto(page_url, wait_until="domcontentloaded", timeout=remaining_ms)
-        waiter = getattr(page, "wait_for_timeout", None)
-        if callable(waiter):
-            waiter(750)
-        if request.operation.value not in {"thread", "about"}:
-            _hydrate_listing(page, min(request.max_records, parameters.page_size), check_budget)
-        actual_url = getattr(page, "url", page_url)
-        _validate_landing(page_url, actual_url)
-        status = int(getattr(response, "status", 200) or 200)
-        html = _stable_content(page)
-        if route_limit_hit:
-            raise RedditCaptureError("request-limit", "Reddit web capture exceeded its request budget")
-        check_budget()
-        if len(html.encode("utf-8")) > MAX_HTML_BYTES:
-            raise RedditCaptureError("byte-limit", "Reddit page exceeds its byte limit")
-        lowered = html.casefold()
-        if status >= 400 or "prove your humanity" in lowered or "challenge-platform" in lowered:
-            raise RedditCaptureError("bot-challenge", f"Reddit challenged the standard page (HTTP {status})")
+        navigated = _page_index == 0
+        actual_url, html = page_url, ""
+        if navigated:
+            remaining_ms = max(1, int((timeout_seconds - (time.monotonic() - ledger["started"])) * 1000))
+            response = page.goto(page_url, wait_until="domcontentloaded", timeout=remaining_ms)
+            waiter = getattr(page, "wait_for_timeout", None)
+            if callable(waiter):
+                waiter(750)
+            if request.operation.value not in {"thread", "about"}:
+                _hydrate_listing(page, min(request.max_records, parameters.page_size), check_budget)
+            actual_url = getattr(page, "url", page_url)
+            _validate_landing(page_url, actual_url)
+            status = int(getattr(response, "status", 200) or 200)
+            html = _stable_content(page)
+            if route_limit_hit:
+                raise RedditCaptureError("request-limit", "Reddit web capture exceeded its request budget")
+            check_budget()
+            if len(html.encode("utf-8")) > MAX_HTML_BYTES:
+                raise RedditCaptureError("byte-limit", "Reddit page exceeds its byte limit")
+            lowered = html.casefold()
+            if status == 429:
+                raise RedditCaptureError("rate-limited", "Reddit rate-limited the standard page (HTTP 429)")
+            if status >= 400 or "prove your humanity" in lowered or "challenge-platform" in lowered:
+                raise RedditCaptureError("bot-challenge", f"Reddit challenged the standard page (HTTP {status})")
 
         if _page_index == 0:
             observed_session = session
@@ -358,7 +413,7 @@ def capture_web_context(
                 me_status, me_body = fetch("https://www.reddit.com/api/me.json")
                 observed_session = classify_me_response(me_status, me_body)
             except RedditCaptureError as error:
-                if error.code in {"timeout", "request-limit", "network-byte-limit", "execution-cancelled"}:
+                if error.code in {"timeout", "request-limit", "network-byte-limit", "execution-cancelled", "rate-limited", "upstream-unavailable"}:
                     raise
             if mode is AccessMode.ACCOUNT and not observed_session.authenticated:
                 raise RedditCaptureError("account-not-verified", "The Reddita account profile is not logged in")
@@ -373,7 +428,7 @@ def capture_web_context(
         try:
             data_status, data_text = fetch(data_url)
         except RedditCaptureError as error:
-            if error.code in {"timeout", "request-limit", "network-byte-limit", "execution-cancelled"}:
+            if error.code in {"timeout", "request-limit", "network-byte-limit", "execution-cancelled", "rate-limited", "upstream-unavailable"}:
                 raise
             data_status, data_text = 0, ""
         rows = []
@@ -395,6 +450,22 @@ def capture_web_context(
             except (ValueError, TypeError, json.JSONDecodeError):
                 rows = []
         if not rows:
+            if not navigated:
+                remaining_ms = max(1, int((timeout_seconds - (time.monotonic() - ledger["started"])) * 1000))
+                response = page.goto(page_url, wait_until="domcontentloaded", timeout=remaining_ms)
+                waiter = getattr(page, "wait_for_timeout", None)
+                if callable(waiter):
+                    waiter(750)
+                _hydrate_listing(page, min(request.max_records, parameters.page_size), check_budget)
+                actual_url = getattr(page, "url", page_url)
+                _validate_landing(page_url, actual_url)
+                status = int(getattr(response, "status", 200) or 200)
+                html = _stable_content(page)
+                lowered = html.casefold()
+                if status == 429:
+                    raise RedditCaptureError("rate-limited", "Reddit rate-limited the standard page (HTTP 429)")
+                if status >= 400 or "prove your humanity" in lowered or "challenge-platform" in lowered:
+                    raise RedditCaptureError("bot-challenge", f"Reddit challenged the standard page (HTTP {status})")
             try:
                 rows, next_value = _parse_dom(
                     request.operation.value, html, actual_url, parameters.max_comments,
@@ -468,6 +539,7 @@ def capture_web_context(
         settings_digest=settings_digest, access_mode=(
             "web-account" if mode is AccessMode.ACCOUNT else "web-anon"
         ), transport=transport, session_status=session.status.value,
+        session_username=session.username,
         original_acquired_at=captured_at,
     )
 
@@ -478,6 +550,35 @@ def acquire_reddit_research(
     allow_stealth: bool = True, native_transport: bool = True, cancelled=None,
 ) -> RedditCapture:
     """Acquire with an explicit web session or an honest feed fallback."""
+    cache = RedditCache.from_descriptor(cache_fd) if cache_fd is not None else None
+    def cache_key(username: str | None = None) -> str:
+        value = {
+            "sourceSliceDigest": source_slice_digest(request),
+            "settingsDigest": settings_digest,
+            "mode": mode,
+        }
+        if username is not None:
+            value["accountUsername"] = username.casefold()
+        return _canonical_json(value)
+
+    shared_cache_key = cache_key()
+    if cache is not None:
+        cached = _load_cached_capture(cache, shared_cache_key, request, settings_digest)
+        if cached is not None and cached.access_mode != "web-account":
+            return cached
+
+    def finish(capture: RedditCapture) -> RedditCapture:
+        if cache is not None and _cacheable_capture(capture):
+            if capture.access_mode == "web-account" and capture.session_username is None:
+                return capture
+            key = (cache_key(capture.session_username)
+                   if capture.access_mode == "web-account" else shared_cache_key)
+            _write_cache_optional(
+                cache, key, json.loads(capture.model_dump_json()),
+                captured_at=capture.original_acquired_at.timestamp(),
+            )
+        return capture
+
     aliases = {"web-account": AccessMode.ACCOUNT, "account": AccessMode.ACCOUNT,
                "web-anon": AccessMode.ANONYMOUS, "anonymous": AccessMode.ANONYMOUS}
     if mode == "feed":
@@ -491,7 +592,9 @@ def acquire_reddit_research(
         raise RedditCaptureError("invalid-mode", "Reddit access mode is invalid")
     candidates = ([AccessMode.ACCOUNT, AccessMode.ANONYMOUS]
                   if mode == "auto" else [aliases[mode]])
-    terminal_codes = {"timeout", "request-limit", "network-byte-limit", "execution-cancelled"}
+    terminal_codes = {
+        "timeout", "request-limit", "network-byte-limit", "execution-cancelled", "rate-limited",
+    }
     ledger = {"started": time.monotonic(), "requests": 0, "bytes": 0}
     last_error: RedditCaptureError | None = None
     best_web: RedditCapture | None = None
@@ -506,13 +609,19 @@ def acquire_reddit_research(
                 )
                 try:
                     state = probe_session(context)
+                    if cache is not None and candidate is AccessMode.ACCOUNT and state.authenticated:
+                        cached = _load_cached_capture(
+                            cache, cache_key(state.username), request, settings_digest,
+                        )
+                        if cached is not None:
+                            return cached
                     web_capture = capture_web_context(
                         request, context, mode=candidate, session=state,
                         settings_digest=settings_digest, budgets=budgets,
                         cancelled=cancelled, ledger=ledger,
                     )
                     if mode != "auto" or web_capture.result.envelope.complete:
-                        return web_capture
+                        return finish(web_capture)
                     if best_web is None or _capture_rank(web_capture) > _capture_rank(best_web):
                         best_web = web_capture
                 finally:
@@ -565,7 +674,7 @@ def acquire_reddit_research(
         )
         if (best_web is not None and not feed_capture.result.envelope.complete
                 and _capture_rank(best_web) > _capture_rank(feed_capture)):
-            return best_web
+            return finish(best_web)
         return feed_capture
     assert last_error is not None
     raise last_error

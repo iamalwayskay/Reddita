@@ -26,6 +26,7 @@ reddita search "cat joint supplement" 50 --mode auto --json-meta
 reddita subsearch CatAdvice "arthritis supplement" 50 --top --save --json-meta
 reddita thread https://www.reddit.com/r/CatAdvice/comments/POST_ID/title/ 99 --save --json-meta
 reddita about CatAdvice --json-meta
+reddita search "neuropathy product" 1000 --extended --save --json-meta
 ```
 
 Use `--json` for the stable results-only shape. Prefer `--json-meta` for research: it includes `complete`, typed `gaps`, provenance, the requested/actual access path, and records. `--fresh` bypasses the six-hour feed cache.
@@ -83,17 +84,30 @@ Look for symptoms, failed alternatives, objections, desired outcomes, product fo
 ## Commands
 
 ```text
-reddita search QUERY [N] [--new|--top] [--mode MODE] [--save]
-reddita sub SUBREDDIT [N] [--new|--top] [--mode MODE] [--save]
-reddita subsearch SUBREDDIT QUERY [N] [--new|--top] [--mode MODE] [--save]
-reddita thread URL_OR_ID [N] [--mode MODE] [--save]
+reddita search QUERY [N] [--new|--top] [--mode MODE] [--save] [--extended]
+reddita sub SUBREDDIT [N] [--new|--top] [--mode MODE] [--save] [--extended]
+reddita subsearch SUBREDDIT QUERY [N] [--new|--top] [--mode MODE] [--save] [--extended]
+reddita thread URL_OR_ID [N] [--mode MODE] [--save] [--extended]
 reddita about SUBREDDIT [--mode MODE] [--save]
 reddita saved QUERY [N]
 reddita export FILE.jsonl [N]
 reddita session login|status
 ```
 
-Listing commands return up to 100 posts. Thread commands return the post plus up to 99 comments. Limits keep captures reviewable, bounded, and polite.
+Listing commands return up to 100 posts and thread commands return up to 99 comments by default. `--extended` raises the bounded ceiling to 2,500 posts or 1,000 comments, with a one-hour/1,000-request hard budget. Extended work remains sequential and is intended for saved research runs, not parallel scraping.
+
+## Capacity and rate limiting
+
+Reddita reduces avoidable traffic before increasing ceilings:
+
+- identical feed, anonymous-web, and username-scoped account captures use the private six-hour cache;
+- successful JSON pagination keeps one rendered Reddit session instead of reloading the complete site for every page;
+- web data requests and feed pages are paced sequentially; extended feed pages wait 6–8 seconds;
+- HTTP `429` and transient server failures receive at most two bounded retries;
+- `Retry-After` is honored when it fits inside the remaining run deadline;
+- an exhausted `429` is reported as `rate-limited` and stops cross-mode fallback instead of multiplying traffic.
+
+`--extended` increases Reddita's local run budget; it does not increase or bypass a limit imposed by Reddit. Large-scale or commercial collection may require Reddit authorization under Reddit's [Data API Terms](https://redditinc.com/policies/data-api-terms).
 
 ## Output contract
 
@@ -140,6 +154,7 @@ The stable public objects are exported from `reddita`. The CLI remains easiest b
 - Separate private, symlink-rejecting, exclusively locked account and anonymous profiles.
 - Account mode fails closed unless Reddit verifies a username. Cookie names alone are not proof.
 - Bounded pages, records, comments, payload bytes, continuations, storage inputs, and exports.
+- Sequential adaptive pacing, finite retries, terminal rate-limit handling, and a real whole-run deadline.
 - Private versioned SQLite storage, idempotent upserts, FTS5 when available, and safe fallback search.
 - Partial captures preserve evidence and report gaps instead of inventing empty success.
 - CAPTCHA and network challenges are detected and reported, never bypassed.

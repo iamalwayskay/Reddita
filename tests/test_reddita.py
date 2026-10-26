@@ -26,6 +26,8 @@ from reddita.scraper import allow_browser_request
 from reddita.scraper import _validate_page_url
 import reddita.scraper as scraper_module
 from reddita.transport import PublicHttpsBoundary, PublicTransportError
+from reddita.retry import retry_delay
+import reddita.retry as retry_module
 
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -33,6 +35,40 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class RedditaTests(unittest.TestCase):
+    def test_429_without_retry_after_uses_a_long_cooldown_not_server_jitter(self):
+        with patch("reddita.retry.random.uniform", side_effect=lambda lower, _upper: lower) as jitter:
+            self.assertEqual(retry_delay(429, None, 0), 10.0)
+            self.assertEqual(retry_delay(429, None, 1), 20.0)
+        self.assertEqual(jitter.call_args_list[0].args, (10.0, 15.0))
+        self.assertEqual(jitter.call_args_list[1].args, (20.0, 30.0))
+
+    def test_extended_feed_spacing_sustains_the_documented_unauthenticated_rate(self):
+        with patch("reddita.retry.random.uniform", side_effect=lambda lower, _upper: lower):
+            self.assertEqual(retry_module.request_spacing(extended=False), 1.0)
+            self.assertEqual(retry_module.request_spacing(extended=True), 6.0)
+
+    def test_feed_wait_is_deadline_and_cancellation_aware(self):
+        clock = [0.0]
+        def monotonic(): return clock[0]
+        def sleep(seconds): clock[0] += seconds
+
+        with self.assertRaises(RedditCaptureError) as timed_out:
+            scraper_module._interruptible_wait(
+                2.0, started=0.0, timeout_seconds=1,
+                cancelled=None, monotonic=monotonic, sleep=sleep,
+            )
+        self.assertEqual(timed_out.exception.code, "timeout")
+
+        clock[0] = 0.0
+        with self.assertRaises(RedditCaptureError) as cancelled:
+            scraper_module._interruptible_wait(
+                2.0, started=0.0, timeout_seconds=10,
+                cancelled=lambda: clock[0] >= 0.5,
+                monotonic=monotonic, sleep=sleep,
+            )
+        self.assertEqual(cancelled.exception.code, "execution-cancelled")
+        self.assertLess(clock[0], 2.0)
+
     def test_standard_web_contract_uses_normal_reddit_pages_and_json(self):
         cases = [
             ("search", "python tools", {"pageSize": 10, "maxComments": 100, "sort": "new"},
@@ -177,7 +213,7 @@ class RedditaTests(unittest.TestCase):
                 self.assertEqual(len(capture.result.records), 2)
                 self.assertEqual(capture.result.envelope.gaps[0].code, "selector-drift")
 
-    def test_later_live_http_error_preserves_prior_page_evidence(self):
+    def test_exhausted_feed_rate_limit_preserves_prior_page_evidence(self):
         request = SourceRequest(
             source="reddit", operation="search", locator="best office chair back pain",
             parameters_json='{"maxComments":100,"pageSize":2,"sort":"relevance"}',
@@ -190,6 +226,8 @@ class RedditaTests(unittest.TestCase):
         second_url = first_url + "&after=t3_1x0exqu&count=2"
         responses = [
             (first_url, (FIXTURES / "search.rss").read_text(encoding="utf-8"), 200),
+            (second_url, "rate limited", 429),
+            (second_url, "rate limited", 429),
             (second_url, "rate limited", 429),
         ]
 
@@ -230,7 +268,122 @@ class RedditaTests(unittest.TestCase):
             )
         self.assertEqual(len(capture.result.records), 2)
         self.assertFalse(capture.result.envelope.complete)
-        self.assertEqual(capture.result.envelope.gaps[0].code, "http-error")
+        self.assertEqual(capture.result.envelope.gaps[0].code, "rate-limited")
+
+    def test_feed_honors_retry_after_and_retries_the_same_cursor(self):
+        request = SourceRequest(
+            source="reddit", operation="search", locator="best office chair back pain",
+            parameters_json='{"maxComments":100,"pageSize":2,"sort":"relevance"}',
+            max_records=4, max_pages=2,
+        )
+        first_url = (
+            "https://www.reddit.com/search.rss?q=best+office+chair+back+pain"
+            "&type=link&limit=2"
+        )
+        second_url = first_url + "&after=t3_1x0exqu&count=2"
+        responses = [
+            (first_url, (FIXTURES / "search.rss").read_text(encoding="utf-8"), 200, None),
+            (second_url, "rate limited", 429, "2"),
+            (second_url, (FIXTURES / "external-link.rss").read_text(encoding="utf-8"), 200, None),
+        ]
+
+        class Response:
+            def __init__(self, status, retry_after):
+                self.status = status
+                self._retry_after = retry_after
+
+            def header_value(self, name):
+                return self._retry_after if name.casefold() == "retry-after" else None
+
+        class Page:
+            def __init__(self):
+                self.url = "about:blank"
+                self.html = ""
+
+            def route(self, *_args):
+                return None
+
+            def goto(self, url, **_kwargs):
+                expected, self.html, status, retry_after = responses.pop(0)
+                self.url = url
+                if url != expected:
+                    raise AssertionError(f"unexpected page {url}")
+                return Response(status, retry_after)
+
+            def locator(self, _selector):
+                return SimpleNamespace(inner_text=lambda: self.html)
+
+        page = Page()
+        context = SimpleNamespace(new_page=lambda: page, close=lambda: None)
+        class PlaywrightContext:
+            def __enter__(self): return SimpleNamespace()
+            def __exit__(self, *_args): return None
+
+        waits = []
+        with patch("patchright.sync_api.sync_playwright", return_value=PlaywrightContext()), patch.object(
+            scraper_module, "_open_browser_context", return_value=(context, None),
+        ), patch.object(scraper_module, "_interruptible_wait",
+                        side_effect=lambda delay, **_kwargs: waits.append(delay)):
+            capture = scraper_module.acquire_reddit(
+                request, budgets=SourceBudgets(timeout_seconds=30), settings_digest="a" * 64,
+                profile_root=None, native_transport=True,
+            )
+
+        self.assertEqual(len(capture.result.records), 3)
+        self.assertTrue(capture.result.envelope.complete)
+        self.assertIn(2.0, waits)
+        self.assertEqual(responses, [])
+
+    def test_live_invalid_second_feed_preserves_the_first_page(self):
+        request = SourceRequest(
+            source="reddit", operation="search", locator="best office chair back pain",
+            parameters_json='{"maxComments":100,"pageSize":2,"sort":"relevance"}',
+            max_records=4, max_pages=2,
+        )
+        first_url = (
+            "https://www.reddit.com/search.rss?q=best+office+chair+back+pain"
+            "&type=link&limit=2"
+        )
+        second_url = first_url + "&after=t3_1x0exqu&count=2"
+        responses = [
+            (first_url, (FIXTURES / "search.rss").read_text(encoding="utf-8"), 200),
+            (second_url, (FIXTURES / "search-invalid-entry.rss").read_text(encoding="utf-8"), 200),
+        ]
+
+        class Page:
+            def __init__(self):
+                self.url = "about:blank"
+                self.html = ""
+
+            def route(self, *_args): return None
+
+            def goto(self, url, **_kwargs):
+                expected, self.html, status = responses.pop(0)
+                self.url = url
+                if url != expected:
+                    raise AssertionError(f"unexpected page {url}")
+                return SimpleNamespace(status=status)
+
+            def locator(self, _selector):
+                return SimpleNamespace(inner_text=lambda: self.html)
+
+        page = Page()
+        context = SimpleNamespace(new_page=lambda: page, close=lambda: None)
+        class PlaywrightContext:
+            def __enter__(self): return SimpleNamespace()
+            def __exit__(self, *_args): return None
+
+        with patch("patchright.sync_api.sync_playwright", return_value=PlaywrightContext()), patch.object(
+            scraper_module, "_open_browser_context", return_value=(context, None),
+        ), patch.object(scraper_module.time, "sleep", return_value=None):
+            capture = scraper_module.acquire_reddit(
+                request, budgets=SourceBudgets(), settings_digest="a" * 64,
+                profile_root=None, native_transport=True,
+            )
+
+        self.assertEqual(len(capture.result.records), 2)
+        self.assertFalse(capture.result.envelope.complete)
+        self.assertEqual(capture.result.envelope.gaps[0].code, "selector-drift")
 
     def test_bounded_partial_research_capture_is_reused_from_cache(self):
         captured_at = datetime.now(timezone.utc)
@@ -673,6 +826,41 @@ class RedditaTests(unittest.TestCase):
         self.assertEqual(observed["request"].max_pages, 3)
         self.assertEqual(observed["profile"], Path(directory) / "profile")
         self.assertTrue(observed["native_transport"])
+
+    def test_cli_extended_mode_builds_a_bounded_2500_post_capture(self):
+        request = SourceRequest(
+            source="reddit", operation="search", locator="office chair",
+            parameters_json='{"maxComments":100,"pageSize":25,"sort":"relevance"}',
+            max_records=1, max_pages=1,
+        )
+        capture = capture_reddit_pages(
+            request,
+            (RedditPage(
+                url=("https://www.reddit.com/search.rss?q=office+chair&type=link&limit=25"),
+                html=(FIXTURES / "cli-search.rss").read_text(encoding="utf-8"),
+            ),),
+            captured_at=NOW,
+        )
+        observed = {}
+
+        def acquire(source_request, **kwargs):
+            observed["request"] = source_request
+            observed["budgets"] = kwargs["budgets"]
+            return capture
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                code = main(
+                    ["search", "office chair", "2500", "--extended", "--json"],
+                    acquire=acquire, cache_root=Path(directory) / "cache",
+                    profile_root=Path(directory) / "profile",
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(observed["request"].max_records, 2500)
+        self.assertEqual(observed["request"].max_pages, 100)
+        self.assertEqual(observed["budgets"].timeout_seconds, 3600)
+        self.assertEqual(observed["budgets"].max_requests, 1000)
 
     def test_cli_json_exposes_partial_capture_metadata(self):
         request = SourceRequest(

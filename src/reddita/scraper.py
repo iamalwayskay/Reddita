@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import random
 import re
 import stat
 import subprocess
@@ -29,12 +28,14 @@ from .contract import (
     RedditContractError,
     canonical_reddit_thread_id,
     normalize_reddit_request,
+    normalize_reddit_web_request,
 )
 from .models import (
     CaptureEnvelope, CaptureGap, CapturePage, CaptureRecord, SourceRequest,
     SourceResult, source_slice_digest,
 )
 from .transport import PublicHttpsBoundary, PublicTransportError
+from .retry import request_spacing, retry_delay
 
 
 MAX_HTML_BYTES = 8 * 1024 * 1024
@@ -172,6 +173,7 @@ class RedditCapture(BoundaryModel):
     access_mode: Literal["feed", "web-anon", "web-account"] = "feed"
     transport: Literal["atom", "json", "dom"] = "atom"
     session_status: str | None = None
+    session_username: str | None = Field(default=None, min_length=1, max_length=64)
     original_acquired_at: AwareDatetime
 
 
@@ -323,9 +325,15 @@ def _cached_capture_matches(
 ) -> bool:
     try:
         parameters = RedditParameters.model_validate_json(request.parameters_json)
-        _identity, initial_url = normalize_reddit_locator(
-            request.operation.value, request.locator, parameters,
-        )
+        if capture.access_mode == "feed":
+            _identity, initial_url = normalize_reddit_locator(
+                request.operation.value, request.locator, parameters,
+            )
+        else:
+            _identity, initial_url, _data_url = normalize_reddit_web_request(
+                request.operation.value, request.locator,
+                parameters.model_dump(mode="python", by_alias=True),
+            )
         envelope = capture.result.envelope
         if envelope.final_locator is None:
             return False
@@ -336,9 +344,12 @@ def _cached_capture_matches(
             and capture.settings_digest == settings_digest
             and capture.content_digest == _result_digest(capture.result)
             and capture.surface == (
-                "live" if request.operation.value == "about" else "archive"
+                "live" if (
+                    request.operation.value == "about" or capture.access_mode != "feed"
+                ) else "archive"
             )
             and capture.original_acquired_at == envelope.captured_at
+            and (capture.access_mode != "web-account" or capture.session_username is not None)
             and _cacheable_capture(capture)
             and envelope.source.value == "reddit"
             and envelope.operation is request.operation
@@ -355,6 +366,29 @@ def _cacheable_capture(capture: RedditCapture) -> bool:
         and bool(envelope.gaps)
         and all(gap.code in {"record-limit", "comment-limit"} for gap in envelope.gaps)
     )
+
+
+def _interruptible_wait(
+    delay: float, *, started: float, timeout_seconds: int, cancelled,
+    monotonic=time.monotonic, sleep=time.sleep,
+) -> None:
+    """Wait in short slices while preserving cancellation and the run deadline."""
+    remaining_budget = timeout_seconds - (monotonic() - started)
+    if delay >= remaining_budget:
+        raise RedditCaptureError("timeout", "Reddit capture exceeded its time budget")
+    remaining_wait = max(0.0, delay)
+    while remaining_wait > 0:
+        if cancelled and cancelled():
+            raise RedditCaptureError("execution-cancelled", "Reddit capture was cancelled")
+        if monotonic() - started >= timeout_seconds:
+            raise RedditCaptureError("timeout", "Reddit capture exceeded its time budget")
+        chunk = min(0.25, remaining_wait)
+        sleep(chunk)
+        remaining_wait -= chunk
+    if cancelled and cancelled():
+        raise RedditCaptureError("execution-cancelled", "Reddit capture was cancelled")
+    if monotonic() - started >= timeout_seconds:
+        raise RedditCaptureError("timeout", "Reddit capture exceeded its time budget")
 
 
 def _write_cache_optional(
@@ -942,6 +976,8 @@ def _valid_cursor_pairs(pairs: list[tuple[str, str]]) -> bool:
 
 
 def _wall_gap(page: RedditPage) -> CaptureGap | None:
+    if page.status == 429:
+        return CaptureGap(code="rate-limited", detail="Reddit returned HTTP 429", locator=page.url)
     if page.status == 403:
         return CaptureGap(code="access-forbidden", detail="Reddit returned HTTP 403", locator=page.url)
     if page.status >= 400:
@@ -1230,6 +1266,7 @@ def acquire_reddit(
             return cached
     pages: list[RedditPage] = []
     request_count = 0
+    started = time.monotonic()
     network_budget = RedditNetworkBudget(budgets.max_network_bytes)
     public_boundary = PublicHttpsBoundary(allowed_hosts=REDDIT_HOSTS)
     try:
@@ -1290,14 +1327,30 @@ def acquire_reddit(
                     if native_transport and request.operation.value == "about"
                     else "domcontentloaded"
                 )
-                response = page.goto(url, wait_until=wait_until,
-                                     timeout=budgets.timeout_seconds * 1000)
+                for attempt in range(3):
+                    remaining = budgets.timeout_seconds - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise RedditCaptureError("timeout", "Reddit capture exceeded its time budget")
+                    response = page.goto(
+                        url, wait_until=wait_until, timeout=max(1, int(remaining * 1000)),
+                    )
+                    status = response.status if response is not None else 200
+                    retry_after = None
+                    header_value = getattr(response, "header_value", None)
+                    if callable(header_value):
+                        retry_after = header_value("retry-after")
+                    delay = retry_delay(status, retry_after, attempt)
+                    if delay is None or attempt == 2:
+                        break
+                    _interruptible_wait(
+                        delay, started=started, timeout_seconds=budgets.timeout_seconds,
+                        cancelled=cancelled, monotonic=time.monotonic, sleep=time.sleep,
+                    )
                 final_url = page.url
                 html = (
                     page.content() if request.operation.value == "about"
                     else page.locator("body").inner_text()
                 )
-                status = response.status if response is not None else 200
                 if native_transport:
                     network_budget.add(html.encode("utf-8"))
                 pages.append(RedditPage(url=final_url, html=html, status=status))
@@ -1305,14 +1358,23 @@ def acquire_reddit(
                     break
                 if request.operation.value in {"thread", "about"}:
                     break
-                _rows, _contained, next_url = _listing_rows(html, final_url)
+                try:
+                    _rows, _contained, next_url = _listing_rows(html, final_url)
+                except RedditCaptureError as error:
+                    if error.code != "selector-drift":
+                        raise
+                    break
                 if not next_url:
                     break
                 _validate_page_url(request.operation.value,
                                    normalize_reddit_locator(request.operation.value, request.locator, parameters)[0],
                                    initial_url, next_url)
                 url = next_url
-                time.sleep(random.uniform(1.0, 2.5))
+                _interruptible_wait(
+                    request_spacing(extended=budgets.max_requests > 100),
+                    started=started, timeout_seconds=budgets.timeout_seconds,
+                    cancelled=cancelled, monotonic=time.monotonic, sleep=time.sleep,
+                )
             context.close()
             if browser is not None:
                 browser.close()

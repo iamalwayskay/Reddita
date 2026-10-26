@@ -16,6 +16,7 @@ Flags:
   --fresh      bypass the 6h disk cache
   --mode MODE  auto, web-account, web-anon, or feed (default: auto)
   --save       add results to the private searchable research corpus
+  --extended   allow up to 2,500 posts or 1,000 thread comments
   --new        sort by new instead of relevance/hot
   --top        sort by top (all-time) — search/sub only
 
@@ -194,7 +195,9 @@ def main(
     if mode not in {"auto", "web-account", "web-anon", "feed"}:
         raise SystemExit(__doc__)
     raw = [argument for argument in raw if not argument.startswith("--mode=")]
-    known_flags = {"--json", "--json-meta", "--fresh", "--new", "--top", "--save"}
+    known_flags = {
+        "--json", "--json-meta", "--fresh", "--new", "--top", "--save", "--extended",
+    }
     supplied_flags = {argument for argument in raw if argument.startswith("--")}
     if (supplied_flags - known_flags or {"--new", "--top"} <= supplied_flags
             or {"--json", "--json-meta"} <= supplied_flags):
@@ -203,6 +206,7 @@ def main(
     json_meta_output = "--json-meta" in raw
     fresh = "--fresh" in raw
     save = "--save" in raw
+    extended = "--extended" in raw
     sort = "new" if "--new" in raw else "top" if "--top" in raw else None
     args = [argument for argument in raw if not argument.startswith("--")]
     if not args or args[0] not in {"search", "sub", "subsearch", "thread", "about"}:
@@ -216,25 +220,27 @@ def main(
         raise SystemExit(__doc__)
     if command in {"thread", "about"} and supplied_flags & {"--new", "--top"}:
         raise SystemExit(__doc__)
+    if command == "about" and extended:
+        raise SystemExit(__doc__)
 
     if command == "search":
         operation, locator = "search", args[1]
-        count = _count_argument(args, 2, 15, 100)
+        count = _count_argument(args, 2, 15, 2500 if extended else 100)
         parameters = {"pageSize": max(1, min(count, 25)), "maxComments": 100,
                       "sort": sort or "relevance"}
     elif command == "sub":
         operation, locator = "subreddit", _subreddit(args[1])
-        count = _count_argument(args, 2, 15, 100)
+        count = _count_argument(args, 2, 15, 2500 if extended else 100)
         parameters = {"pageSize": max(1, min(count, 25)), "maxComments": 100,
                       "sort": sort or "hot"}
     elif command == "subsearch":
         operation, locator = "subreddit-search", _subreddit(args[1])
-        count = _count_argument(args, 3, 15, 100)
+        count = _count_argument(args, 3, 15, 2500 if extended else 100)
         parameters = {"query": args[2], "pageSize": max(1, min(count, 25)),
                       "maxComments": 100, "sort": sort or "relevance"}
     elif command == "thread":
         operation, locator = "thread", args[1]
-        count = _count_argument(args, 2, 20, 99)
+        count = _count_argument(args, 2, 20, 1000 if extended else 99)
         parameters = {"pageSize": max(1, min(count + 1, 100)),
                       "maxComments": min(count, 1000)}
     else:
@@ -255,7 +261,8 @@ def main(
     try:
         kwargs = dict(
             budgets=SourceBudgets(
-                timeout_seconds=300, max_requests=100,
+                timeout_seconds=3600 if extended else 300,
+                max_requests=1000 if extended else 100,
                 max_network_bytes=100_000_000, max_storage_bytes=1_000_000_000,
             ),
             settings_digest=digest, cache_fd=cache_fd,
