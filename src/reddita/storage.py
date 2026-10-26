@@ -126,7 +126,20 @@ def _reject_symlink_components(path: Path) -> None:
         except OSError as error:
             raise StorageError(f"cannot inspect storage path: {error}") from error
         if stat.S_ISLNK(details.st_mode):
-            raise StorageError("storage paths must not contain symbolic links")
+            # macOS exposes system locations such as /var through immutable,
+            # root-owned aliases.  Permit only those OS-managed components;
+            # user-owned or writable-parent links remain forbidden.
+            try:
+                parent = current.parent.stat()
+            except OSError as error:
+                raise StorageError(f"cannot inspect storage path: {error}") from error
+            system_alias = (
+                getattr(details, "st_uid", -1) == 0
+                and getattr(parent, "st_uid", -1) == 0
+                and parent.st_mode & 0o022 == 0
+            )
+            if not system_alias:
+                raise StorageError("storage paths must not contain symbolic links")
 
 
 def _record_key(source: str, record_type: str, record_id: str) -> str:
