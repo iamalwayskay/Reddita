@@ -90,7 +90,7 @@ class ResearchModeTests(unittest.TestCase):
             "/api/me.json": {"status": 200, "text": '{"data":{"name":"researcher"}}', "length": 30},
             "/search.json?q=repairable+blender&type=link&limit=25&raw_json=1": {
                 "status": 200,
-                "text": (FIXTURES / "json-listing-search.json").read_text(),
+                "text": (FIXTURES / "json-listing-search.json").read_text(encoding="utf-8"),
                 "length": 1000,
             },
         })
@@ -125,7 +125,7 @@ class ResearchModeTests(unittest.TestCase):
             "&limit=25&raw_json=1"
         )
         context = _Context(
-            (FIXTURES / "modern-search.html").read_text(),
+            (FIXTURES / "modern-search.html").read_text(encoding="utf-8"),
             {data_url: _Response(403, "blocked")},
         )
 
@@ -162,7 +162,7 @@ class ResearchModeTests(unittest.TestCase):
 
     def test_cli_passes_explicit_mode_and_can_save_search_and_export(self):
         fixture_context = _Context(
-            (FIXTURES / "modern-search.html").read_text(),
+            (FIXTURES / "modern-search.html").read_text(encoding="utf-8"),
             {(
                 "https://www.reddit.com/search.json?q=repairable+blender&type=link"
                 "&limit=2&raw_json=1"
@@ -205,13 +205,13 @@ class ResearchModeTests(unittest.TestCase):
                 self.assertEqual(main(
                     ["export", str(exported), "10"], store_path=root / "research.sqlite3",
                 ), 0)
-            self.assertEqual(len(exported.read_text().splitlines()), 2)
+            self.assertEqual(len(exported.read_text(encoding="utf-8").splitlines()), 2)
         self.assertNotIn("mode", observed)  # injected test acquire keeps the stable API
 
     def test_auto_falls_back_to_ephemeral_feed_after_browser_runtime_failure(self):
         sentinel = capture_web_context(
             _request(), _Context(
-                (FIXTURES / "modern-search.html").read_text(),
+                (FIXTURES / "modern-search.html").read_text(encoding="utf-8"),
                 {"https://www.reddit.com/search.json?q=repairable+blender&type=link&limit=25&raw_json=1": _Response(403, "blocked")},
             ), mode=AccessMode.ANONYMOUS,
             session=SessionState(SessionStatus.BLOCKED, http_status=403),

@@ -14,7 +14,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 class ModernRedditDomParserTests(unittest.TestCase):
     def test_search_telemetry_posts_preserve_text_metrics_links_and_next_cursor(self):
         rows, after = parse_listing_dom(
-            (FIXTURES / "modern-search.html").read_text(),
+            (FIXTURES / "modern-search.html").read_text(encoding="utf-8"),
             "https://www.reddit.com/search/?q=repairable+blender",
         )
 
@@ -31,7 +31,7 @@ class ModernRedditDomParserTests(unittest.TestCase):
 
     def test_live_search_sdui_card_preserves_tracking_identity_metrics_and_text(self):
         rows, after = parse_listing_dom(
-            (FIXTURES / "modern-search-sdui.html").read_text(),
+            (FIXTURES / "modern-search-sdui.html").read_text(encoding="utf-8"),
             "https://www.reddit.com/search/?q=repairable+vacuum",
         )
 
@@ -50,7 +50,7 @@ class ModernRedditDomParserTests(unittest.TestCase):
 
     def test_shreddit_thread_preserves_recursive_comment_relationships(self):
         rows, truncated = parse_thread_dom(
-            (FIXTURES / "modern-thread.html").read_text(),
+            (FIXTURES / "modern-thread.html").read_text(encoding="utf-8"),
             "https://www.reddit.com/r/BuyItForLife/comments/thrweb/repairable_coffee_grinder/",
             max_comments=2,
         )
@@ -68,7 +68,7 @@ class ModernRedditDomParserTests(unittest.TestCase):
 
     def test_shreddit_thread_infers_depth_and_marks_unrendered_comments_truncated(self):
         rows, truncated = parse_thread_dom(
-            (FIXTURES / "modern-thread-inferred-partial.html").read_text(),
+            (FIXTURES / "modern-thread-inferred-partial.html").read_text(encoding="utf-8"),
             "https://www.reddit.com/r/BuyItForLife/comments/partial1/partial_thread/",
             max_comments=20,
         )
@@ -80,14 +80,14 @@ class ModernRedditDomParserTests(unittest.TestCase):
     def test_shreddit_thread_rejects_post_permalink_for_another_identifier(self):
         with self.assertRaises(ModernDomError):
             parse_thread_dom(
-                (FIXTURES / "modern-thread-mismatched-permalink.html").read_text(),
+                (FIXTURES / "modern-thread-mismatched-permalink.html").read_text(encoding="utf-8"),
                 "https://www.reddit.com/r/BuyItForLife/comments/right1/mismatched_thread/",
                 max_comments=20,
             )
 
     def test_about_dom_reads_standard_subreddit_header(self):
         rows = parse_about_dom(
-            (FIXTURES / "modern-about.html").read_text(),
+            (FIXTURES / "modern-about.html").read_text(encoding="utf-8"),
             "https://www.reddit.com/r/BuyItForLife/",
         )
 

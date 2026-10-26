@@ -95,7 +95,7 @@ class RedditaTests(unittest.TestCase):
         )
         capture = capture_reddit_pages(
             request,
-            (RedditPage(url=page_url, html=(FIXTURES / "search.rss").read_text()),),
+            (RedditPage(url=page_url, html=(FIXTURES / "search.rss").read_text(encoding="utf-8")),),
             captured_at=NOW,
         )
         rows = [json.loads(record.data_json) for record in capture.result.records]
@@ -119,7 +119,7 @@ class RedditaTests(unittest.TestCase):
             (RedditPage(
                 url=("https://www.reddit.com/search.rss?q=durable+product"
                      "&type=link&limit=25"),
-                html=(FIXTURES / "external-link.rss").read_text(),
+                html=(FIXTURES / "external-link.rss").read_text(encoding="utf-8"),
             ),),
             captured_at=NOW,
         )
@@ -143,7 +143,7 @@ class RedditaTests(unittest.TestCase):
             with self.subTest(fixture=fixture):
                 capture = capture_reddit_pages(
                     request,
-                    (RedditPage(url=page_url, html=(FIXTURES / fixture).read_text()),),
+                    (RedditPage(url=page_url, html=(FIXTURES / fixture).read_text(encoding="utf-8")),),
                     captured_at=NOW,
                 )
                 self.assertFalse(capture.result.envelope.complete)
@@ -168,8 +168,8 @@ class RedditaTests(unittest.TestCase):
                 capture = capture_reddit_pages(
                     request,
                     (
-                        RedditPage(url=first_url, html=(FIXTURES / "search.rss").read_text()),
-                        RedditPage(url=second_url, html=(FIXTURES / fixture).read_text()),
+                        RedditPage(url=first_url, html=(FIXTURES / "search.rss").read_text(encoding="utf-8")),
+                        RedditPage(url=second_url, html=(FIXTURES / fixture).read_text(encoding="utf-8")),
                     ),
                     captured_at=NOW,
                 )
@@ -189,7 +189,7 @@ class RedditaTests(unittest.TestCase):
         )
         second_url = first_url + "&after=t3_1x0exqu&count=2"
         responses = [
-            (first_url, (FIXTURES / "search.rss").read_text(), 200),
+            (first_url, (FIXTURES / "search.rss").read_text(encoding="utf-8"), 200),
             (second_url, "rate limited", 429),
         ]
 
@@ -245,7 +245,7 @@ class RedditaTests(unittest.TestCase):
         )
         capture = capture_reddit_pages(
             request,
-            (RedditPage(url=page_url, html=(FIXTURES / "search.rss").read_text()),),
+            (RedditPage(url=page_url, html=(FIXTURES / "search.rss").read_text(encoding="utf-8")),),
             captured_at=captured_at,
         ).model_copy(update={"settings_digest": "a" * 64})
         self.assertFalse(capture.result.envelope.complete)
@@ -286,7 +286,7 @@ class RedditaTests(unittest.TestCase):
         page_url = "https://www.reddit.com/comments/16fqhts/.rss?limit=2"
         capture = capture_reddit_pages(
             request,
-            (RedditPage(url=page_url, html=(FIXTURES / "thread.rss").read_text()),),
+            (RedditPage(url=page_url, html=(FIXTURES / "thread.rss").read_text(encoding="utf-8")),),
             captured_at=NOW,
         )
         rows = [(record.record_type, json.loads(record.data_json))
@@ -318,7 +318,7 @@ class RedditaTests(unittest.TestCase):
             request,
             (RedditPage(
                 url="https://www.reddit.com/comments/16fqhts/.rss?limit=11",
-                html=(FIXTURES / "thread-comments-only.rss").read_text(),
+                html=(FIXTURES / "thread-comments-only.rss").read_text(encoding="utf-8"),
             ),),
             captured_at=NOW,
         )
@@ -618,7 +618,7 @@ class RedditaTests(unittest.TestCase):
             request,
             (RedditPage(
                 url="https://www.reddit.com/r/buyitforlife/top/.rss?t=all&limit=25",
-                html=(FIXTURES / "subreddit.rss").read_text(),
+                html=(FIXTURES / "subreddit.rss").read_text(encoding="utf-8"),
             ),),
             captured_at=NOW,
         )
@@ -642,7 +642,7 @@ class RedditaTests(unittest.TestCase):
             (RedditPage(
                 url=("https://www.reddit.com/search.rss?q=office+chair"
                      "&type=link&limit=25"),
-                html=(FIXTURES / "cli-search.rss").read_text(),
+                html=(FIXTURES / "cli-search.rss").read_text(encoding="utf-8"),
             ),),
             captured_at=NOW,
         )
@@ -685,7 +685,7 @@ class RedditaTests(unittest.TestCase):
             (RedditPage(
                 url=("https://www.reddit.com/search.rss?q=best+office+chair+back+pain"
                      "&type=link&limit=2"),
-                html=(FIXTURES / "search.rss").read_text(),
+                html=(FIXTURES / "search.rss").read_text(encoding="utf-8"),
             ),),
             captured_at=NOW,
         )

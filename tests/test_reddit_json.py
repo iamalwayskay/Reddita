@@ -25,7 +25,7 @@ class RedditJsonParserTests(unittest.TestCase):
 
     def test_listing_preserves_research_fields_and_after_cursor(self):
         rows, after = parse_listing_json(
-            (FIXTURES / "json-listing-search.json").read_text(),
+            (FIXTURES / "json-listing-search.json").read_text(encoding="utf-8"),
             "https://www.reddit.com/search.json?q=durable+chair&limit=25",
         )
 
@@ -46,7 +46,7 @@ class RedditJsonParserTests(unittest.TestCase):
 
     def test_thread_recurses_and_reports_unexpanded_or_limited_comments(self):
         rows, truncated = parse_thread_json(
-            (FIXTURES / "json-thread-recursive.json").read_text(),
+            (FIXTURES / "json-thread-recursive.json").read_text(encoding="utf-8"),
             "https://www.reddit.com/comments/thr123/which_kettle_lasts.json?limit=2",
             max_comments=2,
         )
@@ -66,7 +66,7 @@ class RedditJsonParserTests(unittest.TestCase):
 
     def test_thread_comment_listing_cursor_marks_capture_truncated(self):
         rows, truncated = parse_thread_json(
-            (FIXTURES / "json-thread-after.json").read_text(),
+            (FIXTURES / "json-thread-after.json").read_text(encoding="utf-8"),
             "https://www.reddit.com/comments/after1/a_bounded_comment_page.json",
             max_comments=10,
         )
@@ -79,16 +79,16 @@ class RedditJsonParserTests(unittest.TestCase):
     def test_listing_rejects_post_permalink_for_another_identifier(self):
         with self.assertRaises(RedditJsonError):
             parse_listing_json(
-                (FIXTURES / "json-listing-mismatched-permalink.json").read_text(),
+                (FIXTURES / "json-listing-mismatched-permalink.json").read_text(encoding="utf-8"),
                 "https://www.reddit.com/search.json?q=mismatched",
             )
 
     def test_morechildren_ids_and_response_are_bounded_with_hierarchy(self):
         child_ids = extract_more_children_json(
-            (FIXTURES / "json-thread-more-ids.json").read_text(),
+            (FIXTURES / "json-thread-more-ids.json").read_text(encoding="utf-8"),
         )
         rows, truncated = parse_morechildren_json(
-            (FIXTURES / "json-morechildren.json").read_text(),
+            (FIXTURES / "json-morechildren.json").read_text(encoding="utf-8"),
             "https://www.reddit.com/api/morechildren.json?link_id=t3_more01",
             thread_id="more01",
             max_comments=2,
@@ -110,7 +110,7 @@ class RedditJsonParserTests(unittest.TestCase):
 
     def test_about_preserves_public_community_counts_and_provenance(self):
         rows = parse_about_json(
-            json.loads((FIXTURES / "json-about.json").read_text()),
+            json.loads((FIXTURES / "json-about.json").read_text(encoding="utf-8")),
             "https://www.reddit.com/r/BuyItForLife/about.json",
         )
 

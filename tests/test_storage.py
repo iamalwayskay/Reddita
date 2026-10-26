@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timezone
 import json
 import os
@@ -77,7 +78,7 @@ class ResearchCorpusTests(unittest.TestCase):
 
             if os.name != "nt":
                 self.assertEqual(os.stat(database).st_mode & 0o777, 0o600)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 version = connection.execute(
                     "SELECT version FROM schema_version"
                 ).fetchone()[0]
@@ -98,16 +99,17 @@ class ResearchCorpusTests(unittest.TestCase):
     def test_unknown_schema_version_is_rejected_without_mutating_database(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "future.sqlite3"
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 connection.execute(
                     "CREATE TABLE schema_version (singleton INTEGER PRIMARY KEY, version INTEGER)"
                 )
                 connection.execute("INSERT INTO schema_version VALUES (1, 999)")
+                connection.commit()
 
             with self.assertRaises(StorageError):
                 ResearchCorpus(database)
 
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 tables = {
                     row[0] for row in connection.execute(
                         "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -122,7 +124,7 @@ class ResearchCorpusTests(unittest.TestCase):
                 receipt = corpus.save_capture(
                     make_capture(), query_metadata={"project": "legacy"},
                 )
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 connection.execute("ALTER TABLE capture_queries RENAME TO capture_queries_new")
                 connection.execute(
                     """CREATE TABLE capture_queries (
@@ -137,6 +139,7 @@ class ResearchCorpusTests(unittest.TestCase):
                 )
                 connection.execute("DROP TABLE capture_queries_new")
                 connection.execute("UPDATE schema_version SET version = 2")
+                connection.commit()
 
             with ResearchCorpus(database) as corpus:
                 corpus.save_capture(make_capture(), query_metadata={"project": "again"})
@@ -153,7 +156,7 @@ class ResearchCorpusTests(unittest.TestCase):
                 receipt = corpus.save_capture(
                     make_capture(), query_metadata={"project": "version-one"},
                 )
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 connection.execute("DROP TABLE capture_queries")
                 connection.execute("PRAGMA legacy_alter_table = ON")
                 connection.execute("ALTER TABLE captures RENAME TO captures_new")
@@ -179,6 +182,7 @@ class ResearchCorpusTests(unittest.TestCase):
                 )
                 connection.execute("DROP TABLE captures_new")
                 connection.execute("UPDATE schema_version SET version = 1")
+                connection.commit()
 
             destination = root / "migrated.jsonl"
             with ResearchCorpus(database) as corpus:
