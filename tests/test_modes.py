@@ -183,7 +183,9 @@ class ResearchModeTests(unittest.TestCase):
             return capture
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            # macOS exposes /var as a system symlink; resolve the temporary
+            # root because the cache intentionally rejects every symlink.
+            root = Path(directory).resolve()
             output = StringIO()
             with redirect_stdout(output):
                 self.assertEqual(main(
