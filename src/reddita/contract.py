@@ -151,5 +151,62 @@ def normalize_reddit_request(
     return identity, f"https://www.reddit.com/comments/{identity}/.rss?limit={limit}"
 
 
+def normalize_reddit_web_request(
+    operation: str, locator: str, parameters: Mapping[str, object],
+) -> tuple[str, str, str]:
+    """Return the canonical standard-domain page and same-origin JSON endpoint."""
+    # Reuse the feed contract as the single validation boundary, then construct
+    # only fixed public, read-only www.reddit.com routes from its identity.
+    identity, _feed_url = normalize_reddit_request(operation, locator, parameters)
+    page_size = min(int(parameters.get("pageSize", 25)), 100)
+    sort = parameters.get("sort")
+
+    if operation == "search":
+        pairs = [("q", identity)]
+        if sort in {"new", "top"}:
+            pairs.extend((("sort", str(sort)), ("t", "all")))
+        pairs.append(("type", "link"))
+        page = "https://www.reddit.com/search/?" + urlencode(pairs)
+        data = "https://www.reddit.com/search.json?" + urlencode(
+            pairs + [("limit", str(page_size)), ("raw_json", "1")]
+        )
+        return identity, page, data
+
+    if operation == "subreddit":
+        canonical_sort = str(sort or "hot")
+        pairs = [("t", "all")] if canonical_sort == "top" else []
+        page = f"https://www.reddit.com/r/{identity}/{canonical_sort}/"
+        if pairs:
+            page += "?" + urlencode(pairs)
+        data = f"https://www.reddit.com/r/{identity}/{canonical_sort}.json?" + urlencode(
+            pairs + [("limit", str(page_size)), ("raw_json", "1")]
+        )
+        return identity, page, data
+
+    if operation == "subreddit-search":
+        query = _query(parameters.get("query"))
+        pairs = [("q", query), ("restrict_sr", "on")]
+        if sort in {"new", "top"}:
+            pairs.extend((("sort", str(sort)), ("t", "all")))
+        pairs.append(("type", "link"))
+        base = f"https://www.reddit.com/r/{identity}/search"
+        page = base + "/?" + urlencode(pairs)
+        data = base + ".json?" + urlencode(
+            pairs + [("limit", str(page_size)), ("raw_json", "1")]
+        )
+        return identity, page, data
+
+    if operation == "thread":
+        max_comments = min(int(parameters.get("maxComments", 100)), 1000)
+        page = f"https://www.reddit.com/comments/{identity}/"
+        data = page + ".json?" + urlencode(
+            [("limit", str(max_comments)), ("raw_json", "1")]
+        )
+        return identity, page, data
+
+    page = f"https://www.reddit.com/r/{identity}/"
+    return identity, page, f"https://www.reddit.com/r/{identity}/about.json?raw_json=1"
+
+
 def validate_reddit_request_json(operation: str, locator: str, parameters_json: str) -> tuple[str, str]:
     return normalize_reddit_request(operation, locator, parse_reddit_parameters_json(parameters_json))

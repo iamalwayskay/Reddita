@@ -1,0 +1,29 @@
+<!doctype html>
+<html><body>
+  <shreddit-post
+    id="t3_partial1"
+    author="fixture_author"
+    comment-count="200"
+    permalink="/r/BuyItForLife/comments/partial1/partial_thread/"
+    post-title="Partial thread"
+    score="9"
+    subreddit-prefixed-name="r/BuyItForLife">
+    <div slot="text-body"><p>A thread with more comments than rendered.</p></div>
+  </shreddit-post>
+  <shreddit-comment
+    thingid="t1_parent1"
+    author="first_author"
+    score="4"
+    parentid="t3_partial1"
+    permalink="/r/BuyItForLife/comments/partial1/partial_thread/parent1/">
+    <div slot="comment"><p>Top level.</p></div>
+    <shreddit-comment
+      thingid="t1_child2"
+      author="reply_author"
+      score="2"
+      parentid="t1_parent1"
+      permalink="/r/BuyItForLife/comments/partial1/partial_thread/parent1/child2/">
+      <div slot="comment"><p>Nested reply.</p></div>
+    </shreddit-comment>
+  </shreddit-comment>
+</body></html>

@@ -1,0 +1,45 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "after": null,
+      "children": [{
+        "kind": "t3",
+        "data": {
+          "name": "t3_after1",
+          "id": "after1",
+          "subreddit": "BuyItForLife",
+          "title": "A bounded comment page",
+          "selftext": "Testing a thread continuation.",
+          "author": "fixture_author",
+          "created_utc": 1704067200,
+          "score": 10,
+          "num_comments": 2,
+          "permalink": "/r/BuyItForLife/comments/after1/a_bounded_comment_page/",
+          "url": "https://www.reddit.com/r/BuyItForLife/comments/after1/a_bounded_comment_page/",
+          "is_self": true
+        }
+      }]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "after": "t1_later2",
+      "children": [{
+        "kind": "t1",
+        "data": {
+          "name": "t1_first1",
+          "id": "first1",
+          "parent_id": "t3_after1",
+          "author": "first_author",
+          "body": "The first bounded comment.",
+          "created_utc": 1704070800,
+          "score": 4,
+          "permalink": "/r/BuyItForLife/comments/after1/a_bounded_comment_page/first1/",
+          "replies": ""
+        }
+      }]
+    }
+  }
+]

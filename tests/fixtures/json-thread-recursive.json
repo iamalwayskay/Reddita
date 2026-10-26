@@ -1,0 +1,77 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "after": null,
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "name": "t3_thr123",
+            "id": "thr123",
+            "subreddit": "BuyItForLife",
+            "title": "Which kettle lasts?",
+            "selftext": "I need one that can survive daily use.",
+            "author": "kettle_buyer",
+            "created_utc": 1704067200,
+            "score": 145,
+            "num_comments": 3,
+            "permalink": "/r/BuyItForLife/comments/thr123/which_kettle_lasts/",
+            "url": "https://www.reddit.com/r/BuyItForLife/comments/thr123/which_kettle_lasts/",
+            "is_self": true
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "after": null,
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "name": "t1_top001",
+            "id": "top001",
+            "parent_id": "t3_thr123",
+            "author": "repair_person",
+            "body": "Look for a replaceable heating element.",
+            "created_utc": 1704070800,
+            "score": 29,
+            "permalink": "/r/BuyItForLife/comments/thr123/which_kettle_lasts/top001/",
+            "replies": {
+              "kind": "Listing",
+              "data": {
+                "after": null,
+                "children": [
+                  {
+                    "kind": "t1",
+                    "data": {
+                      "name": "t1_reply02",
+                      "id": "reply02",
+                      "parent_id": "t1_top001",
+                      "author": "fixture_owner",
+                      "body": "Replacement parts were the deciding factor for me.",
+                      "created_utc": 1704074400,
+                      "score": 11,
+                      "permalink": "/r/BuyItForLife/comments/thr123/which_kettle_lasts/top001/reply02/",
+                      "replies": ""
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "kind": "more",
+          "data": {
+            "count": 1,
+            "children": ["hidden3"]
+          }
+        }
+      ]
+    }
+  }
+]

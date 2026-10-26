@@ -1,0 +1,38 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "after": null,
+      "children": [{
+        "kind": "t3",
+        "data": {
+          "name": "t3_more01",
+          "id": "more01",
+          "subreddit": "BuyItForLife",
+          "title": "More comments fixture",
+          "selftext": "A bounded expansion fixture.",
+          "author": "fixture_author",
+          "created_utc": 1704067200,
+          "score": 7,
+          "num_comments": 3,
+          "permalink": "/r/BuyItForLife/comments/more01/more_comments_fixture/",
+          "url": "https://www.reddit.com/r/BuyItForLife/comments/more01/more_comments_fixture/",
+          "is_self": true
+        }
+      }]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "after": null,
+      "children": [{
+        "kind": "more",
+        "data": {
+          "count": 3,
+          "children": ["top001", "child02", "later3"]
+        }
+      }]
+    }
+  }
+]

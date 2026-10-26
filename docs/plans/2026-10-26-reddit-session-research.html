@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Reddita session-aware research plan</title>
+  <style>
+    :root{color-scheme:dark;--bg:#101214;--panel:#181c20;--ink:#edf1f4;--muted:#aeb8c2;--line:#303841;--red:#ff5a4f;--green:#5dd39e;--blue:#75b8ff}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    main{max-width:1100px;margin:auto;padding:48px 24px 80px}h1{font-size:42px;line-height:1.05;margin:0 0 12px}h2{margin-top:38px}h3{margin-bottom:6px}.lede{color:var(--muted);font-size:18px;max-width:780px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(235px,1fr));gap:14px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}.tag{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 9px;color:var(--blue);font-size:12px}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{white-space:pre-wrap;background:#0b0d0f;border:1px solid var(--line);border-radius:12px;padding:16px;color:#d6e2eb}.ok{color:var(--green)}.no{color:var(--red)}table{width:100%;border-collapse:collapse}th,td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:10px}th{color:var(--muted)}svg{width:100%;height:auto;background:#0b0d0f;border:1px solid var(--line);border-radius:14px}small{color:var(--muted)}
+  </style>
+</head>
+<body><main>
+  <span class="tag">implementation contract · 2026-10-26</span>
+  <h1>A Reddit researcher that uses the web session it actually has</h1>
+  <p class="lede">Replace the RSS-only acquisition path with explicit account, anonymous-web, and feed transports. Keep every path read-only, bounded, attributable, and honest about fallbacks.</p>
+
+  <h2>Architecture</h2>
+  <svg viewBox="0 0 1040 430" role="img" aria-label="Reddita access-mode flow">
+    <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8z" fill="#75b8ff"/></marker></defs>
+    <g fill="#181c20" stroke="#303841" stroke-width="2"><rect x="40" y="165" width="180" height="92" rx="14"/><rect x="310" y="34" width="220" height="82" rx="14"/><rect x="310" y="174" width="220" height="82" rx="14"/><rect x="310" y="314" width="220" height="82" rx="14"/><rect x="640" y="110" width="180" height="100" rx="14"/><rect x="640" y="265" width="180" height="100" rx="14"/><rect x="895" y="165" width="110" height="92" rx="14"/></g>
+    <g fill="#edf1f4" font-family="ui-sans-serif" text-anchor="middle"><text x="130" y="201" font-size="18">CLI / Python</text><text x="130" y="228" fill="#aeb8c2">auto · account · anon · feed</text><text x="420" y="69" font-size="18">Account profile</text><text x="420" y="94" fill="#aeb8c2">manual login + /api/me</text><text x="420" y="209" font-size="18">Anonymous profile</text><text x="420" y="234" fill="#aeb8c2">warmed, app-owned</text><text x="420" y="349" font-size="18">Public feeds</text><text x="420" y="374" fill="#aeb8c2">last-resort fallback</text><text x="730" y="147" font-size="18">Standard Reddit</text><text x="730" y="174" fill="#aeb8c2">same-origin JSON</text><text x="730" y="193" fill="#aeb8c2">then modern DOM</text><text x="730" y="302" font-size="18">Canonical parser</text><text x="730" y="329" fill="#aeb8c2">posts · threads · comments</text><text x="730" y="348" fill="#aeb8c2">provenance + gaps</text><text x="950" y="201" font-size="18">Results</text><text x="950" y="228" fill="#aeb8c2">JSON / text</text></g>
+    <g stroke="#75b8ff" stroke-width="2" fill="none" marker-end="url(#a)"><path d="M220 190C260 150 270 76 310 76"/><path d="M220 211H310"/><path d="M220 235C260 278 270 355 310 355"/><path d="M530 76C590 76 586 145 640 145"/><path d="M530 215C580 215 590 178 640 178"/><path d="M530 355H640"/><path d="M730 210V265"/><path d="M820 315C860 315 860 211 895 211"/></g>
+  </svg>
+
+  <h2>Mode contract</h2>
+  <table><thead><tr><th>Mode</th><th>Identity</th><th>Primary</th><th>Failure behaviour</th></tr></thead><tbody>
+    <tr><td><code>auto</code></td><td>Uses the account profile only when verified authenticated</td><td>Account web, otherwise anonymous web</td><td>Falls back to feeds and reports the actual transport</td></tr>
+    <tr><td><code>web-account</code></td><td>Requires a real username from <code>/api/me.json</code></td><td>Standard <code>www.reddit.com</code></td><td>Fails closed; never silently becomes anonymous</td></tr>
+    <tr><td><code>web-anon</code></td><td>Requires <code>/api/me.json</code> to be anonymous</td><td>Standard <code>www.reddit.com</code></td><td>Falls back to feed only in <code>auto</code></td></tr>
+    <tr><td><code>feed</code></td><td>No account</td><td>Public Atom</td><td>Returns typed gaps; never invents metrics</td></tr>
+  </tbody></table>
+
+  <h2>Implementation phases</h2>
+  <div class="grid">
+    <section class="card"><h3>1 · Session boundary</h3><p>Platform-correct private data paths, separate account/anonymous profiles, profile locking, human-driven headed login, status probing, and no credential handling. Tests first for state classification and profile separation.</p></section>
+    <section class="card"><h3>2 · Standard-domain capture</h3><p>Validated normal Reddit URLs; GET-only browser policy; same-origin <code>.json</code> acquisition with modern-DOM fallback; challenge and login-wall detection. Add real trimmed fixtures for listings and threads.</p></section>
+    <section class="card"><h3>3 · Parse and paginate</h3><p>Map listing and recursive thread JSON into the existing stable record schema. Preserve outbound URLs, scores, comment totals, parents, depth, cursor, source URL, partial pages, and typed gaps.</p></section>
+    <section class="card"><h3>4 · Selection and cache</h3><p>Implement mode selection and fallback chain. Include requested mode, selected transport, and session generation in cache identity so account and anonymous data cannot collide.</p></section>
+    <section class="card"><h3>5 · Research corpus</h3><p>Add a private SQLite corpus with idempotent record upserts, capture/query metadata, full-text search with a portable fallback, and JSONL export. Saving stays explicit; account and anonymous records retain provenance.</p></section>
+    <section class="card"><h3>6 · Product surface</h3><p>Add <code>--mode</code>, <code>--save</code>, <code>saved</code>, <code>export</code>, <code>session login</code>, and <code>session status</code>. Keep legacy JSON stable; enrich metadata with identity state and actual transport. Document the CLI and public Python API.</p></section>
+    <section class="card"><h3>7 · Adversarial proof</h3><p>Run unit, browser, storage, security, Linux, and Mac-shaped tests; live-check every operation in feed and anonymous modes; verify an account profile through a user-completed login; fresh-context review and close every finding.</p></section>
+  </div>
+
+  <h2>Target tree</h2>
+  <pre>src/reddita/
+├── cli.py                 commands, --mode, metadata
+├── contract.py            feed and standard-web URL contracts
+├── session.py             dedicated profiles, login, status, locking
+├── reddit_json.py         listing/thread/about JSON parser
+├── modern_dom.py          standard-domain DOM fallback
+├── storage.py             private SQLite corpus, search, JSONL export
+└── scraper.py             bounded acquisition and fallback orchestration
+tests/
+├── fixtures/              trimmed real Reddit JSON/HTML evidence
+├── test_session.py
+├── test_reddit_json.py
+├── test_storage.py
+└── test_modes.py</pre>
+
+  <h2>Decisions and acceptance</h2>
+  <div class="grid">
+    <section class="card"><h3 class="ok">Must prove</h3><ul><li>All five operations work in logged-out web or return an explicit Reddit challenge.</li><li>Account mode proves the username before capture.</li><li>Feed fallback remains usable and labelled.</li><li>Repeated pages, recursive comments, and partial failures are bounded and preserved.</li><li>No cross-mode cache hits, cookies in output, or browser writes.</li></ul></section>
+    <section class="card"><h3 class="no">Deliberately out of scope</h3><ul><li>Voting, posting, messaging, moderation, or private communities.</li><li>Importing a normal Chrome profile or accepting Reddit passwords.</li><li>CAPTCHA/challenge bypass or guaranteed cloud-datacenter access.</li><li>Official Reddit API credentials.</li></ul></section>
+  </div>
+  <p><small>Reference design is informed by open-source session-aware Reddit tools, but implementation stays native to Reddita’s bounded capture model and MIT-compatible dependencies.</small></p>
+</main></body></html>

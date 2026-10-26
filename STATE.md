@@ -33,3 +33,21 @@ The 2026-10-26 research verification replaced those blocked old-Reddit routes wi
 - 33 local tests pass with the browser smoke enabled, including malformed XML, invalid and HTTP-failing second pages, comment-only threads, feed saturation, external-link extraction, provenance, URL boundaries, cache reuse, and strict CLI input.
 
 The 2026-10-26 adversarial Mac/Claude pass added Apple Silicon CI with a real persistent Chromium launch, made the README executable on a clean Mac, added `--json-meta` completeness and typed gaps without breaking legacy `--json`, preserved outbound link-post URLs and thread-comment provenance, and stopped converting unavailable community activity into zero.
+
+The 2026-10-26 session-aware research release replaces the RSS-only product boundary with four explicit routes: `auto`, `web-account`, `web-anon`, and `feed`. Account and anonymous browsers have separate private, locked Reddita-owned profiles. Account login is human-driven in headed Chrome and is accepted only after `/api/me.json` returns a username; credentials and cookie values never enter Reddita.
+
+Standard-domain capture now tries same-origin JSON, recursively parses comments, expands bounded `morechildren` batches, and falls back to current Shreddit DOM (including the live `search-sdui-post` cards). `auto` uses feeds when rendered coverage is shorter, and metadata reports requested mode, actual access mode, transport, session state, completeness, and typed gaps.
+
+A versioned private SQLite research corpus now provides idempotent stable-identity upserts, capture/query provenance, FTS5 with a portable fallback, local search, and atomic JSONL export. CLI commands are `--save`, `saved`, and `export`; the same APIs are public from `reddita`.
+
+Verification on 2026-10-26:
+
+- 82 unit/integration tests pass, plus the opt-in real persistent Chromium smoke test;
+- live logged-out standard-domain search for `cat joint supplement` returned seven scored posts through modern DOM;
+- its selected CatAdvice thread returned the post and 15 nested comments with parent/depth relationships and an honest comment-coverage gap;
+- live `auto` research for `neuropathy foot cream` selected Atom after short web coverage, returned and saved 10 posts, found six saved records for `cream`, and exported 10 private JSONL rows;
+- the Linux headed-login path now selects native Wayland rather than requiring Xorg; macOS continues to use installed Chrome.
+
+Open acceptance item: an authenticated live capture requires the human to complete the one-time login in the dedicated Chrome window. The code and tests fail closed until Reddit verifies the username.
+
+The final adversarial pass moved identity and JSON acquisition into the loaded page's same-origin `fetch`, fixed structured timestamps, enforces one time/request/byte/cancellation budget across every fallback, queues newly exposed `morechildren` generations, uses installed Chrome's native identity consistently for the account profile, makes feed fallback ephemeral and lock-safe, validates invariant landing-page query parameters, migrates corpus schemas v1/v2→v3, and exports append-only query provenance without overwriting repeated research contexts.

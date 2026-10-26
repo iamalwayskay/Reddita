@@ -1,0 +1,51 @@
+{
+  "json": {
+    "errors": [],
+    "data": {
+      "things": [
+        {
+          "kind": "t1",
+          "data": {
+            "name": "t1_top001",
+            "id": "top001",
+            "parent_id": "t3_more01",
+            "author": "top_author",
+            "body": "Expanded top-level evidence.",
+            "created_utc": 1704070800,
+            "score": 12,
+            "depth": 0,
+            "permalink": "/r/BuyItForLife/comments/more01/more_comments_fixture/top001/"
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "name": "t1_child02",
+            "id": "child02",
+            "parent_id": "t1_top001",
+            "author": "reply_author",
+            "body": "Expanded nested evidence.",
+            "created_utc": 1704074400,
+            "score": 5,
+            "depth": 1,
+            "permalink": "/r/BuyItForLife/comments/more01/more_comments_fixture/top001/child02/"
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "name": "t1_later3",
+            "id": "later3",
+            "parent_id": "t3_more01",
+            "author": "later_author",
+            "body": "This row remains beyond the requested bound.",
+            "created_utc": 1704078000,
+            "score": 3,
+            "depth": 0,
+            "permalink": "/r/BuyItForLife/comments/more01/more_comments_fixture/later3/"
+          }
+        }
+      ]
+    }
+  }
+}

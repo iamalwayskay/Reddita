@@ -1,4 +1,4 @@
-"""Reddita — read-only Reddit research without an API key or login.
+"""Reddita — read-only Reddit research without Reddit developer credentials.
 
 Usage:
   reddita search '<query>' [N]             site-wide post search
@@ -6,18 +6,22 @@ Usage:
   reddita subsearch <subreddit> '<q>' [N]  search within one subreddit
   reddita thread <permalink|id> [N]        post body + top N comments
   reddita about <subreddit>                community metadata
+  reddita session login|status             dedicated account session
+  reddita saved '<query>' [N]              search the local research corpus
+  reddita export <file.jsonl> [N]           export saved records
 
 Flags:
   --json       stable results-only JSON output
   --json-meta  JSON with completeness, gaps, provenance, and results
   --fresh      bypass the 6h disk cache
+  --mode MODE  auto, web-account, web-anon, or feed (default: auto)
+  --save       add results to the private searchable research corpus
   --new        sort by new instead of relevance/hot
   --top        sort by top (all-time) — search/sub only
 
-The tool reads public Reddit feeds and community pages through an unauthenticated,
-persistent, GET-only browser profile at ~/.local/share/reddita/browser-profile/.
-Its private six-hour cache is at ~/.cache/reddita/. Posting, voting, messaging,
-login, and private content are intentionally unsupported.
+The tool uses separate Reddita-owned anonymous and account browser profiles.
+Account login is completed by the human in a headed browser; Reddita never accepts
+credentials. Posting, voting, messaging, and private content are unsupported.
 """
 
 from __future__ import annotations
@@ -30,12 +34,17 @@ import sys
 from collections.abc import Callable
 
 from .models import SourceBudgets, SourceRequest
-from .scraper import RedditCaptureError, acquire_reddit
+from .scraper import RedditCaptureError
 from .cache import canonical_digest, open_private_cache, record_rows
+from .research import acquire_reddit_research
+from .session import (
+    AccessMode, default_profile_root, inspect_profile, login_account, profile_paths,
+)
 
 
 DEFAULT_CACHE = Path.home() / ".cache" / "reddita"
-DEFAULT_PROFILE = Path.home() / ".local" / "share" / "reddita" / "browser-profile"
+DEFAULT_PROFILE = default_profile_root()
+DEFAULT_STORE = DEFAULT_PROFILE / "research.sqlite3"
 
 
 def _count_argument(args: list[str], index: int, default: int, maximum: int) -> int:
@@ -61,7 +70,7 @@ def _legacy(capture, operation: str):
             "score": row.get("score"), "comments": row.get("commentCount"),
             "author": row.get("author") or "?", "age": row.get("age") or "",
             "url": row.get("externalUrl"),
-            "permalink": row.get("observedPermalink") or row.get("permalink") or "",
+            "permalink": row.get("permalink") or row.get("observedPermalink") or "",
         } for kind, row in rows if kind == "post"]
     if operation == "thread":
         post = next((row for kind, row in rows if kind == "thread"), {})
@@ -93,7 +102,7 @@ def _legacy(capture, operation: str):
     }
 
 
-def _json_document(capture, operation: str) -> dict:
+def _json_document(capture, operation: str, requested_mode: str | None = None) -> dict:
     envelope = capture.result.envelope
     return {
         "complete": envelope.complete,
@@ -101,6 +110,10 @@ def _json_document(capture, operation: str) -> dict:
         "continuation": envelope.continuation,
         "capturedAt": envelope.captured_at.isoformat(),
         "acquisitionMode": capture.acquisition_mode,
+        "accessMode": capture.access_mode,
+        "requestedMode": requested_mode,
+        "transport": capture.transport,
+        "sessionStatus": capture.session_status,
         "requestedLocator": envelope.requested_locator,
         "finalLocator": envelope.final_locator,
         "recordCount": envelope.record_count,
@@ -123,12 +136,65 @@ def main(
     argv: list[str] | None = None, *, acquire: Callable | None = None,
     cache_root: Path = DEFAULT_CACHE,
     profile_root: Path = DEFAULT_PROFILE,
+    store_path: Path = DEFAULT_STORE,
 ) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw in (["--help"], ["-h"]):
         print(__doc__)
         return 0
-    known_flags = {"--json", "--json-meta", "--fresh", "--new", "--top"}
+    if raw[:1] == ["session"]:
+        if len(raw) != 2 or raw[1] not in {"login", "status"}:
+            raise SystemExit(__doc__)
+        paths = profile_paths(profile_root)
+        if raw[1] == "login":
+            try:
+                state = login_account(paths[AccessMode.ACCOUNT])
+            except Exception as error:
+                raise SystemExit(f"Reddita could not open or verify the login browser: {error}") from None
+            print(f"Logged in as u/{state.username} in Reddita's dedicated profile.")
+            return 0
+        try:
+            state = inspect_profile(paths[AccessMode.ACCOUNT])
+        except Exception as error:
+            raise SystemExit(f"Reddita could not inspect the account profile: {error}") from None
+        identity = f" as u/{state.username}" if state.username else ""
+        print(f"account profile: {state.status.value}{identity}")
+        return 0
+    if raw[:1] in (["saved"], ["export"]):
+        command = raw[0]
+        if len(raw) not in {2, 3} or (len(raw) == 3 and not raw[2].isdigit()):
+            raise SystemExit(__doc__)
+        limit = 50 if len(raw) == 2 else int(raw[2])
+        if not 1 <= limit <= 10_000:
+            raise SystemExit(__doc__)
+        from .storage import ResearchCorpus
+        with ResearchCorpus(store_path) as corpus:
+            if command == "export":
+                count = corpus.export_jsonl(Path(raw[1]), limit=limit)
+                print(f"Exported {count} records to {raw[1]}")
+                return 0
+            records = corpus.search(raw[1], limit=limit)
+        documents = [{
+            "source": item.source, "recordType": item.record_type,
+            "recordId": item.record_id, "sourceLocator": item.source_locator,
+            "data": item.data, "firstSeenAt": item.first_seen_at,
+            "lastSeenAt": item.last_seen_at, "captureCount": item.capture_count,
+        } for item in records]
+        print(json.dumps(documents, indent=2))
+        return 0
+    if "--mode" in raw:
+        position = raw.index("--mode")
+        if position + 1 >= len(raw) or raw.count("--mode") != 1:
+            raise SystemExit(__doc__)
+        raw[position:position + 2] = [f"--mode={raw[position + 1]}"]
+    mode_flags = [argument for argument in raw if argument.startswith("--mode=")]
+    if len(mode_flags) > 1:
+        raise SystemExit(__doc__)
+    mode = mode_flags[0].split("=", 1)[1] if mode_flags else "auto"
+    if mode not in {"auto", "web-account", "web-anon", "feed"}:
+        raise SystemExit(__doc__)
+    raw = [argument for argument in raw if not argument.startswith("--mode=")]
+    known_flags = {"--json", "--json-meta", "--fresh", "--new", "--top", "--save"}
     supplied_flags = {argument for argument in raw if argument.startswith("--")}
     if (supplied_flags - known_flags or {"--new", "--top"} <= supplied_flags
             or {"--json", "--json-meta"} <= supplied_flags):
@@ -136,6 +202,7 @@ def main(
     json_output = "--json" in raw
     json_meta_output = "--json-meta" in raw
     fresh = "--fresh" in raw
+    save = "--save" in raw
     sort = "new" if "--new" in raw else "top" if "--top" in raw else None
     args = [argument for argument in raw if not argument.startswith("--")]
     if not args or args[0] not in {"search", "sub", "subsearch", "thread", "about"}:
@@ -180,13 +247,13 @@ def main(
         max_records=max(1, min(count + (1 if operation == "thread" else 0), 10_000)),
         max_pages=(1 if operation in {"thread", "about"} else max(1, (count + 24) // 25)),
     )
-    digest = canonical_digest({"schemaVersion": "reddita.v1", "request": request.model_dump(mode="json")})
+    digest = canonical_digest({
+        "schemaVersion": "reddita.v2", "request": request.model_dump(mode="json"),
+        "requestedMode": mode,
+    })
     cache_fd = None if fresh else open_private_cache(cache_root)
-    profile_fd = open_private_cache(profile_root)
-    os.close(profile_fd)
     try:
-        capture = (acquire or acquire_reddit)(
-            request,
+        kwargs = dict(
             budgets=SourceBudgets(
                 timeout_seconds=300, max_requests=100,
                 max_network_bytes=100_000_000, max_storage_bytes=1_000_000_000,
@@ -194,6 +261,9 @@ def main(
             settings_digest=digest, cache_fd=cache_fd,
             profile_root=profile_root, native_transport=True, allow_stealth=True,
         )
+        if acquire is None:
+            kwargs["mode"] = mode
+        capture = (acquire or acquire_reddit_research)(request, **kwargs)
     except RedditCaptureError as error:
         raise SystemExit(str(error)) from None
     finally:
@@ -210,8 +280,15 @@ def main(
         print(f"warning: Reddit capture is partial — {details}", file=sys.stderr)
 
     data = _legacy(capture, operation)
+    if save:
+        from .storage import ResearchCorpus
+        with ResearchCorpus(store_path) as corpus:
+            corpus.save_capture(capture, query_metadata={
+                "operation": operation, "locator": locator,
+                "parameters": parameters, "requestedMode": mode,
+            })
     if json_meta_output:
-        print(json.dumps(_json_document(capture, operation), indent=2))
+        print(json.dumps(_json_document(capture, operation, mode), indent=2))
     elif json_output:
         print(json.dumps(data, indent=2))
     elif operation in {"search", "subreddit", "subreddit-search"}:

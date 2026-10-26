@@ -1,20 +1,12 @@
 # Reddita
 
-A read-only Reddit research tool for humans and AI agents. It searches public posts, reads subreddit listings and threads, and returns community metadata without an API key, Reddit app, or login. It uses Reddit's public Atom feeds for research captures, carries forward the original scraper's private persistent browser profile and polite pacing, and caches repeat captures for six hours.
+Reddita is a read-only Reddit research CLI and Python library. It searches posts, reads communities and thread trees, records provenance and completeness, and saves deduplicated evidence in a private searchable SQLite corpus.
 
-It is deliberately read-only: the browser permits GET requests and aborts state-changing methods. Main navigation is HTTPS and must end on the requested Reddit page. Posting, voting, messaging, authentication, and private content are unsupported.
+It works without Reddit developer credentials. Its default `auto` mode tries a verified Reddita-only account session, then a separate warmed anonymous session, then Reddit's public feeds. The output always says which route worked.
 
 ## Install
 
-Requires Python 3.12+.
-
-On a clean Mac, install Python first. With Homebrew:
-
-```bash
-brew install python@3.12
-```
-
-Without Homebrew, use the Python 3.12 macOS installer from [python.org](https://www.python.org/downloads/macos/).
+Requires Python 3.12+ and works on macOS, Linux, and Windows.
 
 ```bash
 git clone https://github.com/iamalwayskay/Reddita.git
@@ -25,33 +17,98 @@ python -m pip install -e .
 patchright install chromium
 ```
 
-## Use
+On a clean Mac, install Python first with `brew install python@3.12` or use [python.org](https://www.python.org/downloads/macos/). Account login uses installed Google Chrome; normal research can use Patchright's bundled Chromium.
+
+## Quick start
 
 ```bash
-reddita search "local AI tools" 10
-reddita sub python 15 --new
-reddita subsearch LocalLLaMA "quantization" 20 --top
-reddita thread https://www.reddit.com/r/python/comments/abc123/example/ 25
-reddita about python
+reddita search "cat joint supplement" 50 --mode auto --json-meta
+reddita subsearch CatAdvice "arthritis supplement" 50 --top --save --json-meta
+reddita thread https://www.reddit.com/r/CatAdvice/comments/POST_ID/title/ 99 --save --json-meta
+reddita about CatAdvice --json-meta
 ```
 
-Add `--json` for the stable results-only machine output. For research agents, prefer `--json-meta`: its top level reports completeness, gaps, acquisition time/mode, provenance, and a `results` payload. Always inspect `complete` and `gaps`. Add `--fresh` to bypass the private six-hour cache.
+Use `--json` for the stable results-only shape. Prefer `--json-meta` for research: it includes `complete`, typed `gaps`, provenance, the requested/actual access path, and records. `--fresh` bypasses the six-hour feed cache.
+
+## Access modes
+
+| Mode | What it does | When to use it |
+|---|---|---|
+| `auto` | Verified account web → anonymous web → public feed | Default; highest chance of a useful answer |
+| `web-account` | Requires a verified username in Reddita's dedicated account profile | Standard Reddit as a logged-in user |
+| `web-anon` | Standard `www.reddit.com` with a separate persistent anonymous profile | Logged-out research with live metrics when available |
+| `feed` | Public Atom feeds | Fast, robust fallback; scores and comment totals can be `null` |
+
+Web routes try same-origin Reddit JSON first and modern Reddit DOM second. Feed fallback is reported as `feed`/`atom`; it is never mislabeled as a complete scored web capture.
+
+### Dedicated account session
 
 ```bash
-reddita search "open source OCR" 10 --json-meta > results.json
+reddita session login
+reddita session status
+reddita search "neuropathy foot cream" 50 --mode web-account --json-meta
 ```
 
-The command exits non-zero on invalid input, a denied network boundary, a browser failure, or an incomplete empty response. Reddit can change its HTML, return `403 Blocked`, or rate-limit unauthenticated requests by network/IP; the tool reports that rather than bypassing it. Treat captures as research evidence, not a guaranteed API.
+`session login` opens ordinary Chrome. You type into Reddit directly; Reddita never receives a username, password, or cookie value. Login succeeds only when Reddit returns a real username from `/api/me.json`. Reddita never imports or touches your everyday Chrome profile.
 
-Listing commands return up to 100 posts and automatically fetch the required 25-item feed pages. Thread commands return the post and up to 99 comments. Atom feeds provide titles, authors, subreddit, timestamps, permalinks, and post/comment text, but not vote or comment totals; those fields are `null` in JSON and `?` in human output. Reddit's chosen sort order is preserved.
+Profiles are separated under the platform application-data directory:
 
-## Give it to Claude, GPT, or another coding agent
+- macOS: `~/Library/Application Support/Reddita/profiles/`
+- Linux: `${XDG_DATA_HOME:-~/.local/share}/reddita/profiles/`
+- Windows: `%LOCALAPPDATA%\Reddita\profiles\`
 
-Share the repository URL and this prompt:
+## Product and avatar research recipe
 
-> Install this repository following its README. Use `reddita ... --json-meta` for public Reddit research, inspect `complete` and `gaps`, then analyze `results`. Let Reddita manage its own unauthenticated browser profile; never import a personal profile or add credentials, login automation, posting, voting, or private-content access. When integrating it, prefer the CLI for subprocess use or the documented Python API for in-process use.
+Good product research uses several queries and keeps both durable demand and recent language:
 
-The repository also includes [docs/agent-guide.md](docs/agent-guide.md) and an `AGENTS.md` instruction file that coding agents discover automatically.
+```bash
+reddita search 'cat arthritis supplement' 50 --top --save --json-meta
+reddita search 'cat joint supplement side effects' 50 --new --save --json-meta
+reddita subsearch CatAdvice 'senior cat mobility' 50 --top --save --json-meta
+reddita search 'neuropathy cream stopped working' 50 --top --save --json-meta
+reddita search 'neuropathy supplement scam' 50 --new --save --json-meta
+```
+
+Then read promising threads, save their comments, and query the corpus for customer language:
+
+```bash
+reddita thread POST_URL 99 --save --json-meta
+reddita saved "side effects" 50
+reddita saved "wish it" 50
+reddita export research.jsonl 10000
+```
+
+Look for symptoms, failed alternatives, objections, desired outcomes, product forms, brands, and exact phrases people repeat. Every saved item retains its Reddit permalink, first/last seen timestamps, capture count, and normalized source fields. Re-running a query updates an item by stable Reddit identity instead of duplicating it.
+
+## Commands
+
+```text
+reddita search QUERY [N] [--new|--top] [--mode MODE] [--save]
+reddita sub SUBREDDIT [N] [--new|--top] [--mode MODE] [--save]
+reddita subsearch SUBREDDIT QUERY [N] [--new|--top] [--mode MODE] [--save]
+reddita thread URL_OR_ID [N] [--mode MODE] [--save]
+reddita about SUBREDDIT [--mode MODE] [--save]
+reddita saved QUERY [N]
+reddita export FILE.jsonl [N]
+reddita session login|status
+```
+
+Listing commands return up to 100 posts. Thread commands return the post plus up to 99 comments. Limits keep captures reviewable, bounded, and polite.
+
+## Output contract
+
+All records have a stable ID, record type, source index, canonical permalink/source URL, and canonical JSON body. Web posts include available score and comment count. Thread comments include parent ID, depth, top-level status, timestamp, score, and permalink. `null` means Reddit did not expose a value; it never means zero.
+
+| Field | Meaning |
+|---|---|
+| `complete` | Reddita saw no known uncollected page/comment gap |
+| `gaps` | Typed reasons such as `record-limit`, `comment-limit`, challenge, or selector drift |
+| `accessMode` | Actual route: `web-account`, `web-anon`, or `feed` |
+| `transport` | Actual representation: `json`, `dom`, or `atom` |
+| `sessionStatus` | Observed identity state for a web session |
+| `acquisitionMode` | Fresh acquisition or cache hit |
+
+Never ignore `complete` and `gaps` in automated research.
 
 ## Python API
 
@@ -59,64 +116,58 @@ The repository also includes [docs/agent-guide.md](docs/agent-guide.md) and an `
 import json
 from pathlib import Path
 
-from reddita import SourceBudgets, SourceRequest, acquire_reddit
+from reddita import ResearchCorpus, SourceBudgets, SourceRequest, acquire_reddit_research
 
 request = SourceRequest(
-    source="reddit",
-    operation="search",
-    locator="local AI tools",
-    parameters_json=json.dumps({
-        "pageSize": 10,
-        "maxComments": 100,
-        "sort": "relevance",
-    }),
-    max_records=10,
-    max_pages=1,
+    source="reddit", operation="search", locator="cat joint supplement",
+    parameters_json=json.dumps({"pageSize": 25, "maxComments": 100, "sort": "top"}),
+    max_records=50, max_pages=2,
 )
-
-capture = acquire_reddit(
-    request,
-    budgets=SourceBudgets(),
-    settings_digest="0" * 64,
-    profile_root=Path.home() / ".local" / "share" / "reddita" / "browser-profile",
-    native_transport=True,
-    allow_stealth=True,
+capture = acquire_reddit_research(
+    request, budgets=SourceBudgets(timeout_seconds=300),
+    settings_digest="0" * 64, mode="auto",
 )
-
-for record in capture.result.records:
-    print(json.loads(record.data_json))
+with ResearchCorpus(Path.home() / ".local/share/reddita/research.sqlite3") as corpus:
+    corpus.save_capture(capture, query_metadata={"project": "cat-supplement"})
+    matches = corpus.search("side effects", limit=50)
 ```
 
-`settings_digest` identifies the caller's effective settings for cache correctness. Use a stable SHA-256 hex digest in production. This minimal Python example is uncached because it does not pass a private cache descriptor. The CLI is the recommended interface because it creates and validates the private profile and cache directories automatically and caches repeat captures for six hours.
+The stable public objects are exported from `reddita`. The CLI remains easiest because it manages private directories, profiles, caching, mode selection, and formatting.
 
-## Output model
+## Safety and reliability
 
-- `search`, `sub`, and `subsearch` return post records, including available post text.
-- `thread` returns one thread record followed by bounded comment records.
-- `about` returns one community record.
-- Every record carries a stable ID, source index, canonical source URL, and canonical JSON payload.
-- Capture metadata records completeness, pages, typed gaps, continuation state, and acquisition time.
+- GET-only browser boundary. No posting, voting, messaging, moderation, or private-community access.
+- Separate private, symlink-rejecting, exclusively locked account and anonymous profiles.
+- Account mode fails closed unless Reddit verifies a username. Cookie names alone are not proof.
+- Bounded pages, records, comments, payload bytes, continuations, storage inputs, and exports.
+- Private versioned SQLite storage, idempotent upserts, FTS5 when available, and safe fallback search.
+- Partial captures preserve evidence and report gaps instead of inventing empty success.
+- CAPTCHA and network challenges are detected and reported, never bypassed.
 
-## Safety and scope
+Reddita is not an official Reddit client. Use it responsibly and comply with applicable laws, Reddit's terms, and community expectations.
 
-- Main navigation is restricted to the exact requested public `www.reddit.com` page. Research feeds load no subresources; rendered community pages may load GET-only assets from `www.redditstatic.com`, but not Reddit API, JSON, account, message, or login routes.
-- The CLI reuses an unauthenticated profile at `~/.local/share/reddita/browser-profile/`; profile and cache directories are private and reject symlinks.
-- The browser may load GET resources referenced by Reddit, but aborts POST and every other state-changing method.
-- Captured HTML, pages, records, comments, continuation state, and cache entries are bounded.
-- Cache directories and files reject symlinks and unsafe permissions.
+## Design references
 
-This is not an official Reddit client. Reddita uses Reddit's public Atom feeds because logged-out old-Reddit listing/search/thread routes are commonly redirected to login. If Reddit withdraws a public feed or returns an access wall, Reddita reports the failure instead of bypassing it or returning fake empty results.
+The design was checked against open-source prior art:
 
-Use the tool responsibly and comply with applicable laws, Reddit's terms, and community expectations.
+- [8TrafficAI/reddit-skills](https://github.com/8TrafficAI/reddit-skills) — dedicated macOS Chrome, CDP, login doctor, same-origin fetch (MIT)
+- [feedgrab](https://github.com/iBigQiang/feedgrab) — hybrid acquisition, paging, retries, `morechildren` expansion (MIT)
+- [preaverage/reddit-mcp](https://github.com/preaverage/reddit-mcp) — manual browser login and session refresh (MIT)
+- [reddhog](https://github.com/c4pi/reddhog) — warmed persistent anonymous profile (MIT)
+- [Stash](https://github.com/arrpollo/Stash) — durable offline library and interrupted-sync preservation (MIT)
+- [Apify Dataset](https://docs.apify.com/storage/dataset) — dataset/export ergonomics benchmark; Reddita remains local and private
+
+Closed Apify actors were used only to compare output and coverage claims; no closed or unlicensed code was copied.
 
 ## Development
 
 ```bash
 python -m pip install -e .
 python -m unittest discover -s tests -v
+REDDITA_BROWSER_SMOKE=1 python -m unittest tests.test_browser_smoke -v
 ```
 
-The parser tests use local Atom/HTML fixtures and mocked Reddit acquisition; they do not depend on Reddit being reachable. CI additionally installs and launches real Chromium on Linux and an Apple Silicon macOS runner.
+Parser tests use trimmed real-shaped JSON/HTML fixtures. CI launches real Chromium on Linux and Apple Silicon macOS. Account integration is opt-in because CI must never contain a user's Reddit session.
 
 ## License
 

@@ -1,0 +1,23 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": null,
+    "children": [{
+      "kind": "t3",
+      "data": {
+        "name": "t3_right1",
+        "id": "right1",
+        "subreddit": "BuyItForLife",
+        "title": "Mismatched evidence",
+        "selftext": "This must not be attributed to another post.",
+        "author": "fixture_author",
+        "created_utc": 1704067200,
+        "score": 1,
+        "num_comments": 1,
+        "permalink": "/r/BuyItForLife/comments/wrong2/mismatched_evidence/",
+        "url": "https://www.reddit.com/r/BuyItForLife/comments/wrong2/mismatched_evidence/",
+        "is_self": true
+      }
+    }]
+  }
+}

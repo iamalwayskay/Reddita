@@ -17,7 +17,9 @@ from reddita import SourceBudgets, SourceRequest, SourceResult
 from reddita.cache import open_private_cache
 from reddita.cli import main
 import reddita.cli as cli_module
-from reddita.contract import RedditContractError, normalize_reddit_request
+from reddita.contract import (
+    RedditContractError, normalize_reddit_request, normalize_reddit_web_request,
+)
 from reddita.models import CaptureEnvelope, CaptureGap
 from reddita.scraper import RedditCaptureError, RedditPage, capture_reddit_pages
 from reddita.scraper import allow_browser_request
@@ -31,6 +33,31 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class RedditaTests(unittest.TestCase):
+    def test_standard_web_contract_uses_normal_reddit_pages_and_json(self):
+        cases = [
+            ("search", "python tools", {"pageSize": 10, "maxComments": 100, "sort": "new"},
+             "https://www.reddit.com/search/?q=python+tools&sort=new&t=all&type=link",
+             "https://www.reddit.com/search.json?q=python+tools&sort=new&t=all&type=link&limit=10&raw_json=1"),
+            ("subreddit", "Python", {"pageSize": 25, "maxComments": 100, "sort": "top"},
+             "https://www.reddit.com/r/python/top/?t=all",
+             "https://www.reddit.com/r/python/top.json?t=all&limit=25&raw_json=1"),
+            ("subreddit-search", "Python", {"query": "typing", "pageSize": 25,
+             "maxComments": 100, "sort": "relevance"},
+             "https://www.reddit.com/r/python/search/?q=typing&restrict_sr=on&type=link",
+             "https://www.reddit.com/r/python/search.json?q=typing&restrict_sr=on&type=link&limit=25&raw_json=1"),
+            ("thread", "16fqhts", {"pageSize": 11, "maxComments": 10},
+             "https://www.reddit.com/comments/16fqhts/",
+             "https://www.reddit.com/comments/16fqhts/.json?limit=10&raw_json=1"),
+        ]
+        for operation, locator, parameters, page_url, json_url in cases:
+            with self.subTest(operation=operation):
+                identity, actual_page, actual_json = normalize_reddit_web_request(
+                    operation, locator, parameters,
+                )
+                self.assertTrue(identity)
+                self.assertEqual(actual_page, page_url)
+                self.assertEqual(actual_json, json_url)
+
     def test_search_contract_is_canonical_and_bounded(self):
         identity, url = normalize_reddit_request(
             "search", "python tools", {"pageSize": 10, "maxComments": 100},
@@ -524,6 +551,24 @@ class RedditaTests(unittest.TestCase):
                 profile_root=Path("/private/reddita-profile"),
                 allow_stealth=True,
             )
+        self.assertNotIn("user_agent", chromium.options)
+
+    def test_system_chrome_channel_keeps_its_native_user_agent(self):
+        class Chromium:
+            executable_path = "/bundled/chromium"
+
+            def launch_persistent_context(self, _path, **kwargs):
+                self.options = kwargs
+                return "persistent-context"
+
+        chromium = Chromium()
+        scraper_module._open_browser_context(
+            SimpleNamespace(chromium=chromium),
+            profile_root=Path("/private/reddita-profile"),
+            allow_stealth=True,
+            channel="chrome",
+        )
+        self.assertEqual(chromium.options["channel"], "chrome")
         self.assertNotIn("user_agent", chromium.options)
 
     def test_persistent_browser_allows_get_and_aborts_state_changing_methods(self):

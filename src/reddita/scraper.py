@@ -169,6 +169,9 @@ class RedditCapture(BoundaryModel):
     content_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     settings_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     acquisition_mode: Literal["acquired", "cache-hit"] = "acquired"
+    access_mode: Literal["feed", "web-anon", "web-account"] = "feed"
+    transport: Literal["atom", "json", "dom"] = "atom"
+    session_status: str | None = None
     original_acquired_at: AwareDatetime
 
 
@@ -1132,19 +1135,27 @@ def _matching_user_agent(playwright) -> str | None:
     )
 
 
-def _open_browser_context(playwright, *, profile_root: Path | None, allow_stealth: bool):
+def _open_browser_context(
+    playwright, *, profile_root: Path | None, allow_stealth: bool,
+    channel: str | None = None,
+):
     """Open the original persistent Reddit browser, or an isolated API context."""
     launch_options = {"headless": True}
     if allow_stealth:
         launch_options["args"] = ["--disable-blink-features=AutomationControlled"]
+    if channel is not None:
+        launch_options["channel"] = channel
     context_options = {
         "locale": "en-US",
         "timezone_id": "UTC",
         "viewport": {"width": 1366, "height": 900},
     }
-    user_agent = _matching_user_agent(playwright)
-    if user_agent is not None:
-        context_options["user_agent"] = user_agent
+    # A system Chrome channel must present its own exact user agent.  The
+    # derived override is only for Patchright's bundled Chromium binary.
+    if channel is None:
+        user_agent = _matching_user_agent(playwright)
+        if user_agent is not None:
+            context_options["user_agent"] = user_agent
     if profile_root is not None:
         context = playwright.chromium.launch_persistent_context(
             str(profile_root), **launch_options, **context_options,

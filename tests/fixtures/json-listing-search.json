@@ -1,0 +1,43 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": "t3_next99",
+    "dist": 2,
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "name": "t3_self01",
+          "id": "self01",
+          "subreddit": "BuyItForLife",
+          "title": "A chair that lasted fifteen years",
+          "selftext": "The steel frame is still solid after daily use.",
+          "author": "fixture_researcher",
+          "created_utc": 1704067200,
+          "score": 321,
+          "num_comments": 47,
+          "permalink": "/r/BuyItForLife/comments/self01/a_chair_that_lasted_fifteen_years/",
+          "url": "https://www.reddit.com/r/BuyItForLife/comments/self01/a_chair_that_lasted_fifteen_years/",
+          "is_self": true
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "name": "t3_link02",
+          "id": "link02",
+          "subreddit": "OfficeChairs",
+          "title": "Manufacturer specification sheet",
+          "selftext": "",
+          "author": "chair_tester",
+          "created_utc": 1704153600,
+          "score": 88,
+          "num_comments": 12,
+          "permalink": "/r/OfficeChairs/comments/link02/manufacturer_specification_sheet/",
+          "url": "https://example.com/chairs/model-42",
+          "is_self": false
+        }
+      }
+    ]
+  }
+}
