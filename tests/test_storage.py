@@ -75,7 +75,8 @@ class ResearchCorpusTests(unittest.TestCase):
             with ResearchCorpus(database):
                 pass
 
-            self.assertEqual(os.stat(database).st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(os.stat(database).st_mode & 0o777, 0o600)
             with sqlite3.connect(database) as connection:
                 version = connection.execute(
                     "SELECT version FROM schema_version"
@@ -270,7 +271,8 @@ class ResearchCorpusTests(unittest.TestCase):
                     corpus.export_jsonl(link)
 
             self.assertEqual(count, 1)
-            self.assertEqual(os.stat(destination).st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(os.stat(destination).st_mode & 0o777, 0o600)
             line = destination.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(line), 1)
             document = json.loads(line[0])

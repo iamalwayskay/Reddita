@@ -174,10 +174,13 @@ class ResearchCorpus:
             self._connection.execute("PRAGMA foreign_keys = ON")
             self._connection.execute("PRAGMA journal_mode = DELETE")
             self._initialize_schema(enable_fts is not False)
-        except (OSError, sqlite3.Error) as error:
+        except (OSError, sqlite3.Error, StorageError) as error:
             connection = getattr(self, "_connection", None)
             if connection is not None:
                 connection.close()
+                self._connection = None
+            if isinstance(error, StorageError):
+                raise
             raise StorageError(f"cannot open research corpus: {error}") from error
         self.path.chmod(0o600)
 

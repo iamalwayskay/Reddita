@@ -20,7 +20,8 @@ class BrowserSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             profile = Path(directory) / "profile"
             descriptor = open_private_cache(profile)
-            os.close(descriptor)
+            if isinstance(descriptor, int):
+                os.close(descriptor)
             with sync_playwright() as playwright:
                 context, browser = _open_browser_context(
                     playwright, profile_root=profile, allow_stealth=True,

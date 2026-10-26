@@ -7,6 +7,10 @@ from pathlib import Path
 import stat
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
 def canonical_digest(value: object) -> str:
     payload = json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
@@ -14,12 +18,22 @@ def canonical_digest(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def open_private_cache(path: Path) -> int:
+def open_private_cache(path: Path) -> int | Path:
     """Create and pin a private cache without following any path component."""
     absolute = path.absolute()
     components = absolute.parts[1:]
     if not components or any(component in {".", ".."} for component in components):
         raise ValueError("compatibility cache path is unsafe")
+    if os.name == "nt":
+        current = Path(absolute.anchor)
+        for component in components:
+            current /= component
+            if current.exists() or _is_link_or_junction(current):
+                if _is_link_or_junction(current) or not current.is_dir():
+                    raise ValueError("compatibility cache path is not an owned real directory")
+            else:
+                current.mkdir(mode=0o700)
+        return absolute
     descriptor = os.open(
         "/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
     )

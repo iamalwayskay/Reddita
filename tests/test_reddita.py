@@ -253,7 +253,7 @@ class RedditaTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             cache_fd = open_private_cache(Path(directory) / "cache")
-            writer_fd = os.dup(cache_fd)
+            writer_fd = os.dup(cache_fd) if isinstance(cache_fd, int) else cache_fd
             try:
                 cache = scraper_module.RedditCache.from_descriptor(writer_fd)
                 key = scraper_module._canonical_json({
@@ -270,8 +270,10 @@ class RedditaTests(unittest.TestCase):
                     native_transport=True,
                 )
             finally:
-                os.close(writer_fd)
-                os.close(cache_fd)
+                if isinstance(writer_fd, int):
+                    os.close(writer_fd)
+                if isinstance(cache_fd, int):
+                    os.close(cache_fd)
         self.assertEqual(cached.acquisition_mode, "cache-hit")
         self.assertEqual(cached.result.records, capture.result.records)
 
@@ -511,7 +513,7 @@ class RedditaTests(unittest.TestCase):
         self.assertIsNone(browser)
         self.assertFalse(chromium.ephemeral)
         path, options = chromium.persistent
-        self.assertEqual(path, "/tmp/reddita-profile")
+        self.assertEqual(path, str(Path("/tmp/reddita-profile")))
         self.assertIn("--disable-blink-features=AutomationControlled", options["args"])
 
     def test_browser_user_agent_matches_platform_and_chromium_major(self):

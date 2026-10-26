@@ -267,7 +267,7 @@ def main(
     except RedditCaptureError as error:
         raise SystemExit(str(error)) from None
     finally:
-        if cache_fd is not None:
+        if isinstance(cache_fd, int):
             os.close(cache_fd)
 
     envelope = capture.result.envelope

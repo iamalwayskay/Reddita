@@ -183,12 +183,18 @@ class RedditCache:
         self._root_fd = None
         self.ttl_seconds = ttl_seconds
         info = self.root.stat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or self.root.is_symlink():
+        is_redirect = self.root.is_symlink() or bool(
+            getattr(self.root, "is_junction", lambda: False)()
+        )
+        if (not stat.S_ISDIR(info.st_mode) or is_redirect
+                or (os.name != "nt" and info.st_mode & 0o077)):
             raise RedditCaptureError("unsafe-cache", "Reddit cache root must be private")
         self._identity = (info.st_dev, info.st_ino)
 
     @classmethod
-    def from_descriptor(cls, descriptor: int, *, ttl_seconds: int = 21_600) -> "RedditCache":
+    def from_descriptor(cls, descriptor: int | Path, *, ttl_seconds: int = 21_600) -> "RedditCache":
+        if isinstance(descriptor, Path):
+            return cls(descriptor, ttl_seconds=ttl_seconds)
         info = os.fstat(descriptor)
         if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
             raise RedditCaptureError("unsafe-cache", "Reddit cache descriptor must be private")
@@ -218,25 +224,40 @@ class RedditCache:
 
     def get(self, key: str, *, now: float | None = None) -> object | None:
         try:
-            root_fd = self._open()
-            try:
-                descriptor = os.open(self._name(key), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                                     dir_fd=root_fd)
+            if os.name == "nt" and self.root is not None:
+                entry = self.root / self._name(key)
+                if (entry.is_symlink()
+                        or bool(getattr(entry, "is_junction", lambda: False)())):
+                    return None
+                before = entry.stat()
+                if not entry.is_file() or before.st_size > 2_000_000:
+                    return None
+                payload = entry.read_bytes()
+                after = entry.stat()
+                if (len(payload) != before.st_size
+                        or (before.st_size, before.st_mtime_ns)
+                        != (after.st_size, after.st_mtime_ns)):
+                    return None
+            else:
+                root_fd = self._open()
                 try:
-                    before = os.fstat(descriptor)
-                    if (not stat.S_ISREG(before.st_mode) or before.st_mode & 0o077
-                            or before.st_size > 2_000_000):
-                        return None
-                    payload = os.pread(descriptor, before.st_size + 1, 0)
-                    after = os.fstat(descriptor)
-                    if (len(payload) != before.st_size
-                            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-                            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
-                        return None
+                    descriptor = os.open(self._name(key), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                         dir_fd=root_fd)
+                    try:
+                        before = os.fstat(descriptor)
+                        if (not stat.S_ISREG(before.st_mode) or before.st_mode & 0o077
+                                or before.st_size > 2_000_000):
+                            return None
+                        payload = os.pread(descriptor, before.st_size + 1, 0)
+                        after = os.fstat(descriptor)
+                        if (len(payload) != before.st_size
+                                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+                            return None
+                    finally:
+                        os.close(descriptor)
                 finally:
-                    os.close(descriptor)
-            finally:
-                os.close(root_fd)
+                    os.close(root_fd)
             value = json.loads(payload)
             current = time.time() if now is None else now
             if (set(value) != {"schemaVersion", "capturedAt", "keyHash", "data"}
@@ -259,6 +280,22 @@ class RedditCache:
         }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
         if len(payload) > 2_000_000:
             raise RedditCaptureError("cache-limit", "Reddit cache entry exceeds its byte limit")
+        if os.name == "nt" and self.root is not None:
+            destination = self.root / self._name(key)
+            temporary_path = self.root / f".{self._name(key)}.{os.getpid()}.{os.urandom(8).hex()}.tmp"
+            try:
+                descriptor = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    offset = 0
+                    while offset < len(payload):
+                        offset += os.write(descriptor, payload[offset:])
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                os.replace(temporary_path, destination)
+            finally:
+                temporary_path.unlink(missing_ok=True)
+            return
         root_fd = self._open()
         temporary = f".{self._name(key)}.{os.getpid()}.{os.urandom(8).hex()}.tmp"
         try:
