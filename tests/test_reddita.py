@@ -893,6 +893,97 @@ class RedditaTests(unittest.TestCase):
         self.assertEqual(len(document["results"]), 1)
         self.assertIn("partial", stderr.getvalue())
 
+    def test_agent_mode_returns_one_compact_self_describing_json_document(self):
+        request = SourceRequest(
+            source="reddit", operation="search", locator="best office chair back pain",
+            parameters_json='{"maxComments":100,"pageSize":2,"sort":"relevance"}',
+            max_records=1, max_pages=1,
+        )
+        capture = capture_reddit_pages(
+            request,
+            (RedditPage(
+                url=("https://www.reddit.com/search.rss?q=best+office+chair+back+pain"
+                     "&type=link&limit=2"),
+                html=(FIXTURES / "search.rss").read_text(encoding="utf-8"),
+            ),),
+            captured_at=NOW,
+        )
+        stdout, stderr = StringIO(), StringIO()
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(
+                    ["search", "best office chair back pain", "1", "--agent", "--fresh"],
+                    acquire=lambda *_args, **_kwargs: capture,
+                    cache_root=Path(directory) / "cache",
+                    profile_root=Path(directory) / "profile",
+                )
+
+        document = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertNotIn("\n", stdout.getvalue().strip())
+        self.assertEqual(document["schemaVersion"], "reddita.agent.v1")
+        self.assertTrue(document["ok"])
+        self.assertFalse(document["complete"])
+        self.assertEqual(document["nextAction"], "use-partial-results")
+        self.assertEqual(document["gaps"][0]["code"], "record-limit")
+
+    def test_agent_mode_returns_typed_json_for_capture_failure(self):
+        stdout, stderr = StringIO(), StringIO()
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(
+                    ["search", "neuropathy product", "50", "--agent", "--fresh"],
+                    acquire=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                        RedditCaptureError("rate-limited", "Reddit asked this client to slow down")
+                    ),
+                    cache_root=Path(directory) / "cache",
+                    profile_root=Path(directory) / "profile",
+                )
+
+        document = json.loads(stdout.getvalue())
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(document, {
+            "schemaVersion": "reddita.agent.v1",
+            "ok": False,
+            "error": {
+                "code": "rate-limited",
+                "message": "Reddit asked this client to slow down",
+                "retryable": True,
+            },
+            "nextAction": "retry-later",
+        })
+
+    def test_agent_mode_never_turns_empty_partial_capture_into_plain_text(self):
+        incomplete = SimpleNamespace(result=SourceResult(
+            envelope=CaptureEnvelope(
+                schema_version="1", source="reddit", operation="about",
+                requested_locator="python", final_locator="https://www.reddit.com/r/python/",
+                captured_at=NOW, collection_mode="rendered", complete=False,
+                record_count=0, continuation=None,
+                gaps=(CaptureGap(
+                    code="empty-results", detail="Reddit returned no observable records",
+                    locator="https://www.reddit.com/r/python/",
+                ),),
+            ), records=(), pages=(),
+        ))
+        stdout, stderr = StringIO(), StringIO()
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(
+                    ["about", "python", "--agent", "--fresh"],
+                    acquire=lambda *_args, **_kwargs: incomplete,
+                    cache_root=Path(directory) / "cache",
+                    profile_root=Path(directory) / "profile",
+                )
+
+        document = json.loads(stdout.getvalue())
+        self.assertEqual((code, stderr.getvalue()), (2, ""))
+        self.assertFalse(document["ok"])
+        self.assertEqual(document["error"]["code"], "empty-results")
+        self.assertFalse(document["error"]["retryable"])
+
     def test_help_is_a_successful_stdout_command(self):
         stdout = StringIO()
         with redirect_stdout(stdout):

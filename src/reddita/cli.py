@@ -13,6 +13,7 @@ Usage:
 Flags:
   --json       stable results-only JSON output
   --json-meta  JSON with completeness, gaps, provenance, and results
+  --agent      compact, self-describing JSON for LLM/tool callers
   --fresh      bypass the 6h disk cache
   --mode MODE  auto, web-account, web-anon, or feed (default: auto)
   --save       add results to the private searchable research corpus
@@ -122,6 +123,16 @@ def _json_document(capture, operation: str, requested_mode: str | None = None) -
     }
 
 
+def _agent_error(code: str, message: str) -> dict:
+    retryable = code in {"rate-limited", "upstream-unavailable", "timeout", "profile-in-use"}
+    return {
+        "schemaVersion": "reddita.agent.v1",
+        "ok": False,
+        "error": {"code": code, "message": message, "retryable": retryable},
+        "nextAction": "retry-later" if retryable else "inspect-error",
+    }
+
+
 def _print_posts(posts: list[dict]) -> None:
     for post in posts:
         score = "?" if post["score"] is None else str(post["score"])
@@ -196,14 +207,16 @@ def main(
         raise SystemExit(__doc__)
     raw = [argument for argument in raw if not argument.startswith("--mode=")]
     known_flags = {
-        "--json", "--json-meta", "--fresh", "--new", "--top", "--save", "--extended",
+        "--json", "--json-meta", "--agent", "--fresh", "--new", "--top", "--save",
+        "--extended",
     }
     supplied_flags = {argument for argument in raw if argument.startswith("--")}
     if (supplied_flags - known_flags or {"--new", "--top"} <= supplied_flags
-            or {"--json", "--json-meta"} <= supplied_flags):
+            or len(supplied_flags & {"--json", "--json-meta", "--agent"}) > 1):
         raise SystemExit(__doc__)
     json_output = "--json" in raw
     json_meta_output = "--json-meta" in raw
+    agent_output = "--agent" in raw
     fresh = "--fresh" in raw
     save = "--save" in raw
     extended = "--extended" in raw
@@ -272,6 +285,12 @@ def main(
             kwargs["mode"] = mode
         capture = (acquire or acquire_reddit_research)(request, **kwargs)
     except RedditCaptureError as error:
+        if agent_output:
+            print(json.dumps(
+                _agent_error(error.code, str(error)), separators=(",", ":"),
+                ensure_ascii=False,
+            ))
+            return 2
         raise SystemExit(str(error)) from None
     finally:
         if isinstance(cache_fd, int):
@@ -283,8 +302,17 @@ def main(
             f"{gap.code}: {gap.detail}" for gap in envelope.gaps
         ) or "more bounded results are available"
         if not capture.result.records:
+            if agent_output:
+                first_gap = envelope.gaps[0] if envelope.gaps else None
+                document = _agent_error(
+                    first_gap.code if first_gap else "incomplete",
+                    first_gap.detail if first_gap else details,
+                )
+                print(json.dumps(document, separators=(",", ":"), ensure_ascii=False))
+                return 2
             raise SystemExit(f"Reddit capture incomplete — {details}")
-        print(f"warning: Reddit capture is partial — {details}", file=sys.stderr)
+        if not agent_output:
+            print(f"warning: Reddit capture is partial — {details}", file=sys.stderr)
 
     data = _legacy(capture, operation)
     if save:
@@ -294,7 +322,15 @@ def main(
                 "operation": operation, "locator": locator,
                 "parameters": parameters, "requestedMode": mode,
             })
-    if json_meta_output:
+    if agent_output:
+        document = _json_document(capture, operation, mode)
+        document = {
+            "schemaVersion": "reddita.agent.v1", "ok": True,
+            "nextAction": "use-results" if envelope.complete else "use-partial-results",
+            **document,
+        }
+        print(json.dumps(document, separators=(",", ":"), ensure_ascii=False))
+    elif json_meta_output:
         print(json.dumps(_json_document(capture, operation, mode), indent=2))
     elif json_output:
         print(json.dumps(data, indent=2))

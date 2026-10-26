@@ -31,6 +31,16 @@ reddita search "neuropathy product" 1000 --extended --save --json-meta
 
 Use `--json` for the stable results-only shape. Prefer `--json-meta` for research: it includes `complete`, typed `gaps`, provenance, the requested/actual access path, and records. `--fresh` bypasses the six-hour feed cache.
 
+## LLM and agent use
+
+LLM callers should use `--agent`, not parse the human-readable output:
+
+```bash
+reddita search "neuropathy product" 1000 --extended --save --agent
+```
+
+`--agent` emits exactly one compact JSON document and nothing on stderr. Successful responses use schema `reddita.agent.v1` and include `ok`, `complete`, `gaps`, `continuation`, `nextAction`, provenance, and results. Failures use the same schema with a stable error `code`, message, `retryable` boolean, and `nextAction`. Exit code `0` means usable results, including honestly labelled partial results; exit code `2` means no usable result. Agents should consume partial evidence when `nextAction` is `use-partial-results`, inspect `gaps`, and never create a tight retry loop after `rate-limited`.
+
 ## Access modes
 
 | Mode | What it does | When to use it |
@@ -93,6 +103,8 @@ reddita saved QUERY [N]
 reddita export FILE.jsonl [N]
 reddita session login|status
 ```
+
+Add `--agent` to any research command for the stable LLM/tool-calling response contract.
 
 Listing commands return up to 100 posts and thread commands return up to 99 comments by default. `--extended` raises the bounded ceiling to 2,500 posts or 1,000 comments, with a one-hour/1,000-request hard budget. Extended work remains sequential and is intended for saved research runs, not parallel scraping.
 
