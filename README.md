@@ -167,7 +167,7 @@ python -m unittest discover -s tests -v
 REDDITA_BROWSER_SMOKE=1 python -m unittest tests.test_browser_smoke -v
 ```
 
-Parser tests use trimmed real-shaped JSON/HTML fixtures. CI launches real Chromium on Linux and Apple Silicon macOS. Account integration is opt-in because CI must never contain a user's Reddit session.
+Parser tests use trimmed real-shaped JSON/HTML fixtures. CI runs the full suite, real Chromium smoke test, dependency check, CLI check, and package build on Ubuntu 26.04 x64/ARM64, macOS 26 Apple Silicon/Intel, Windows Server 2025 x64, Windows 11 ARM64, and the latest available Python. Account integration is opt-in because CI must never contain a user's Reddit session.
 
 ## License
 

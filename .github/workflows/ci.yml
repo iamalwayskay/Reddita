@@ -9,19 +9,47 @@ permissions:
 
 jobs:
   test:
+    name: ${{ matrix.name }} / Python ${{ matrix.python }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        include:
+          - name: Ubuntu 26.04 x64
+            os: ubuntu-26.04
+            python: "3.12"
+          - name: Ubuntu 26.04 ARM64
+            os: ubuntu-26.04-arm
+            python: "3.12"
+          - name: macOS 26 Apple Silicon
+            os: macos-26
+            python: "3.12"
+          - name: macOS 26 Intel
+            os: macos-26-intel
+            python: "3.12"
+          - name: Windows Server 2025 x64
+            os: windows-2025
+            python: "3.12"
+          - name: Windows 11 ARM64
+            os: windows-11-arm
+            python: "3.12"
+          - name: Latest Python
+            os: ubuntu-26.04
+            python: "3.x"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
+          check-latest: true
       - run: python -m pip install -e .
       - run: patchright install chromium
-      - run: uname -a
+      - name: Record exact platform
+        run: python -c "import platform, sys; print(platform.platform()); print(platform.machine()); print(sys.version)"
       - run: python -m unittest discover -s tests -v
         env:
           REDDITA_BROWSER_SMOKE: "1"
+      - run: python -m pip check
+      - run: reddita --help
+      - name: Build distributions
+        run: python -m pip install build && python -m build
