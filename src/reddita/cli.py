@@ -13,10 +13,10 @@ Flags:
   --new      sort by new instead of relevance/hot
   --top      sort by top (all-time) — search/sub only
 
-The tool reads public Reddit HTML through an unauthenticated, persistent, GET-only
-browser profile at ~/.local/share/reddita/browser-profile/. Its private six-hour
-cache is at ~/.cache/reddita/. Posting, voting, messaging, login, and private content
-are intentionally unsupported.
+The tool reads public Reddit feeds and community pages through an unauthenticated,
+persistent, GET-only browser profile at ~/.local/share/reddita/browser-profile/.
+Its private six-hour cache is at ~/.cache/reddita/. Posting, voting, messaging,
+login, and private content are intentionally unsupported.
 """
 
 from __future__ import annotations
@@ -37,6 +37,15 @@ DEFAULT_CACHE = Path.home() / ".cache" / "reddita"
 DEFAULT_PROFILE = Path.home() / ".local" / "share" / "reddita" / "browser-profile"
 
 
+def _count_argument(args: list[str], index: int, default: int, maximum: int) -> int:
+    if len(args) <= index:
+        return default
+    raw = args[index]
+    if not raw.isdigit() or not 1 <= int(raw) <= maximum:
+        raise SystemExit(__doc__)
+    return int(raw)
+
+
 def _subreddit(value: str) -> str:
     return re.sub(r"^/?r/", "", value.strip()).strip("/").casefold()
 
@@ -47,8 +56,8 @@ def _legacy(capture, operation: str):
         return [{
             "id": row.get("observedFullname") or row.get("id"),
             "subreddit": row.get("subreddit") or "?",
-            "title": row.get("title"), "score": row.get("score") or 0,
-            "comments": row.get("commentCount") or 0,
+            "title": row.get("title"), "body": row.get("body") or "",
+            "score": row.get("score"), "comments": row.get("commentCount"),
             "author": row.get("author") or "?", "age": row.get("age") or "",
             "url": row.get("externalUrl"),
             "permalink": row.get("observedPermalink") or row.get("permalink") or "",
@@ -63,12 +72,12 @@ def _legacy(capture, operation: str):
         return {
             "post": {
                 "title": post.get("title"), "subreddit": post.get("subreddit") or "?",
-                "score": post.get("score") or 0, "author": post.get("author") or "?",
+                "score": post.get("score"), "author": post.get("author") or "?",
                 "body": post.get("body") or "",
                 "permalink": permalink,
             },
             "comments": [{
-                "author": row.get("author") or "?", "score": row.get("score") or 0,
+                "author": row.get("author") or "?", "score": row.get("score"),
                 "body": row.get("body") or "",
             } for row in comments],
         }
@@ -84,8 +93,10 @@ def _legacy(capture, operation: str):
 
 def _print_posts(posts: list[dict]) -> None:
     for post in posts:
+        score = "?" if post["score"] is None else str(post["score"])
+        comments = "?" if post["comments"] is None else str(post["comments"])
         print(
-            f"{post['score']:>6}▲ {post['comments']:>4}💬  "
+            f"{score:>6}▲ {comments:>4}💬  "
             f"r/{post['subreddit']:<20} {post['title'][:78]}"
         )
         print(f"        {post['permalink']}")
@@ -97,6 +108,10 @@ def main(
     profile_root: Path = DEFAULT_PROFILE,
 ) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
+    known_flags = {"--json", "--fresh", "--new", "--top"}
+    supplied_flags = {argument for argument in raw if argument.startswith("--")}
+    if supplied_flags - known_flags or {"--new", "--top"} <= supplied_flags:
+        raise SystemExit(__doc__)
     json_output = "--json" in raw
     fresh = "--fresh" in raw
     sort = "new" if "--new" in raw else "top" if "--top" in raw else None
@@ -104,28 +119,33 @@ def main(
     if not args or args[0] not in {"search", "sub", "subsearch", "thread", "about"}:
         raise SystemExit(__doc__)
     command = args[0]
-    required = {"search": 2, "sub": 2, "subsearch": 3, "thread": 2, "about": 2}[command]
-    if len(args) < required:
+    allowed_lengths = {
+        "search": {2, 3}, "sub": {2, 3}, "subsearch": {3, 4},
+        "thread": {2, 3}, "about": {2},
+    }
+    if len(args) not in allowed_lengths[command]:
+        raise SystemExit(__doc__)
+    if command in {"thread", "about"} and supplied_flags & {"--new", "--top"}:
         raise SystemExit(__doc__)
 
     if command == "search":
         operation, locator = "search", args[1]
-        count = int(args[2]) if len(args) > 2 and args[2].isdigit() else 15
-        parameters = {"pageSize": max(1, min(count, 100)), "maxComments": 100,
+        count = _count_argument(args, 2, 15, 100)
+        parameters = {"pageSize": max(1, min(count, 25)), "maxComments": 100,
                       "sort": sort or "relevance"}
     elif command == "sub":
         operation, locator = "subreddit", _subreddit(args[1])
-        count = int(args[2]) if len(args) > 2 and args[2].isdigit() else 15
-        parameters = {"pageSize": max(1, min(count, 100)), "maxComments": 100,
+        count = _count_argument(args, 2, 15, 100)
+        parameters = {"pageSize": max(1, min(count, 25)), "maxComments": 100,
                       "sort": sort or "hot"}
     elif command == "subsearch":
         operation, locator = "subreddit-search", _subreddit(args[1])
-        count = int(args[3]) if len(args) > 3 and args[3].isdigit() else 15
-        parameters = {"query": args[2], "pageSize": max(1, min(count, 100)),
+        count = _count_argument(args, 3, 15, 100)
+        parameters = {"query": args[2], "pageSize": max(1, min(count, 25)),
                       "maxComments": 100, "sort": sort or "relevance"}
     elif command == "thread":
         operation, locator = "thread", args[1]
-        count = int(args[2]) if len(args) > 2 and args[2].isdigit() else 20
+        count = _count_argument(args, 2, 20, 99)
         parameters = {"pageSize": max(1, min(count + 1, 100)),
                       "maxComments": min(count, 1000)}
     else:
@@ -136,7 +156,7 @@ def main(
         source="reddit", operation=operation, locator=locator,
         parameters_json=json.dumps(parameters, sort_keys=True, separators=(",", ":")),
         max_records=max(1, min(count + (1 if operation == "thread" else 0), 10_000)),
-        max_pages=1,
+        max_pages=(1 if operation in {"thread", "about"} else max(1, (count + 24) // 25)),
     )
     digest = canonical_digest({"schemaVersion": "reddita.v1", "request": request.model_dump(mode="json")})
     cache_fd = None if fresh else open_private_cache(cache_root)
@@ -174,14 +194,16 @@ def main(
         _print_posts(data)
     elif operation == "thread":
         post = data["post"]
+        post_score = "?" if post["score"] is None else str(post["score"])
         print(
-            f"{post['score']}▲ r/{post['subreddit']} — {post['title']}  "
+            f"{post_score}▲ r/{post['subreddit']} — {post['title']}  "
             f"(u/{post['author']})"
         )
         if post["body"]:
             print("\n" + post["body"][:1500] + "\n" + "-" * 60)
         for comment in data["comments"]:
-            print(f"[{comment['score']}▲ u/{comment['author']}] {comment['body'][:500]}\n")
+            score = "?" if comment["score"] is None else str(comment["score"])
+            print(f"[{score}▲ u/{comment['author']}] {comment['body'][:500]}\n")
     else:
         print(f"{data['subreddit']} — {data['title']}")
         print(

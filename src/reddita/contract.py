@@ -114,7 +114,8 @@ def normalize_reddit_request(
         pairs = [("q", identity)]
         if sort in {"new", "top"}:
             pairs.extend((("sort", sort), ("t", "all")))
-        return identity, "https://old.reddit.com/search?" + urlencode(pairs)
+        pairs.extend((("type", "link"), ("limit", str(min(page_size, 25)))))
+        return identity, "https://www.reddit.com/search.rss?" + urlencode(pairs)
 
     if operation in {"subreddit", "subreddit-search", "about"}:
         identity = _subreddit(locator)
@@ -129,17 +130,25 @@ def normalize_reddit_request(
             pairs = [("q", canonical_query), ("restrict_sr", "on")]
             if sort in {"new", "top"}:
                 pairs.extend((("sort", sort), ("t", "all")))
-            return identity, f"https://old.reddit.com/r/{identity}/search?" + urlencode(pairs)
+            pairs.extend((("type", "link"), ("limit", str(min(page_size, 25)))))
+            return identity, f"https://www.reddit.com/r/{identity}/search.rss?" + urlencode(pairs)
         if query is not None or sort not in {None, "hot", "new", "top"}:
             raise RedditContractError("invalid-parameters", "Reddit listing parameters are incompatible")
         canonical_sort = sort or "hot"
-        suffix = "?t=all" if canonical_sort == "top" else ""
-        return identity, f"https://old.reddit.com/r/{identity}/{canonical_sort}/{suffix}"
+        pairs = []
+        if canonical_sort == "top":
+            pairs.append(("t", "all"))
+        pairs.append(("limit", str(min(page_size, 25))))
+        return identity, (
+            f"https://www.reddit.com/r/{identity}/{canonical_sort}/.rss?"
+            + urlencode(pairs)
+        )
 
     if query is not None or sort is not None:
         raise RedditContractError("invalid-parameters", "Reddit thread parameters are incompatible")
     identity = canonical_reddit_thread_id(locator)
-    return identity, f"https://old.reddit.com/comments/{identity}/"
+    limit = min(max_comments + 1, 100)
+    return identity, f"https://www.reddit.com/comments/{identity}/.rss?limit={limit}"
 
 
 def validate_reddit_request_json(operation: str, locator: str, parameters_json: str) -> tuple[str, str]:

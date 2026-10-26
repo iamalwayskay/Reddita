@@ -17,7 +17,8 @@ import subprocess
 import sys
 import time
 from typing import Literal
-from urllib.parse import parse_qsl, urlencode, unquote, urlsplit
+from urllib.parse import parse_qsl, urlencode, unquote, urlsplit, urlunsplit
+import xml.etree.ElementTree as ET
 
 from bs4 import BeautifulSoup
 from pydantic import AwareDatetime, Field, StrictInt
@@ -44,8 +45,6 @@ _HOP_BY_HOP = frozenset({
     "transfer-encoding", "upgrade",
 })
 _HTTP_FIELD_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
-
-
 class RedditCaptureError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
@@ -300,13 +299,22 @@ def _cached_capture_matches(
                 "live" if request.operation.value == "about" else "archive"
             )
             and capture.original_acquired_at == envelope.captured_at
-            and envelope.complete
+            and _cacheable_capture(capture)
             and envelope.source.value == "reddit"
             and envelope.operation is request.operation
             and envelope.requested_locator == request.locator
         )
     except Exception:
         return False
+
+
+def _cacheable_capture(capture: RedditCapture) -> bool:
+    envelope = capture.result.envelope
+    return envelope.complete or (
+        bool(capture.result.records)
+        and bool(envelope.gaps)
+        and all(gap.code in {"record-limit", "comment-limit"} for gap in envelope.gaps)
+    )
 
 
 def _write_cache_optional(
@@ -366,7 +374,26 @@ def allow_browser_request(method: str, url: str, *, request_count: int, max_requ
         and parsed.hostname in REDDIT_HOSTS and parsed.username is None
         and parsed.password is None and parsed.port is None and parsed.fragment == ""
         and decoded == parsed.path and ".." not in decoded.split("/")
-        and not parsed.path.startswith(("/api/", "/api", "/message/", "/submit", "/login"))
+        and not parsed.path.endswith(".json")
+        and re.search(
+            r"(?:^|/)(?:api|message|submit|login|account)(?:/|$)", parsed.path,
+        ) is None
+    )
+
+
+def allow_browser_subresource(method: str, url: str) -> bool:
+    """Allow only Reddit's inert static assets during rendered about capture."""
+    try:
+        parsed = urlsplit(url)
+        decoded = unquote(parsed.path)
+    except ValueError:
+        return False
+    return (
+        method == "GET" and parsed.scheme == "https"
+        and parsed.hostname == "www.redditstatic.com"
+        and parsed.username is None and parsed.password is None
+        and parsed.port is None and parsed.fragment == ""
+        and decoded == parsed.path and ".." not in decoded.split("/")
     )
 
 
@@ -402,10 +429,139 @@ def _canonical_permalink(value: str | None) -> str | None:
         thread_id = canonical_reddit_thread_id(value)
     except RedditContractError:
         return None
-    return f"https://old.reddit.com/comments/{thread_id}/"
+    return f"https://www.reddit.com/comments/{thread_id}/"
+
+
+def _observed_thread_id(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if (parsed.scheme != "https" or parsed.hostname not in REDDIT_HOSTS
+            or parsed.username is not None or parsed.password is not None
+            or parsed.port is not None or parsed.fragment):
+        return None
+    match = re.search(r"/comments/([a-z0-9]{5,12})(?:/|$)", parsed.path)
+    return match.group(1) if match else None
+
+
+def _observed_comment_matches(value: str | None, thread_id: str, comment_id: str) -> bool:
+    if _observed_thread_id(value) != thread_id or value is None:
+        return False
+    path = urlsplit(value).path.rstrip("/")
+    return re.search(
+        rf"/comments/{re.escape(thread_id)}/[^/]+/{re.escape(comment_id)}$", path,
+    ) is not None
+
+
+def _invalid_feed(detail: str) -> None:
+    raise RedditCaptureError("selector-drift", detail)
+
+
+def _atom_author(entry) -> str | None:
+    author = entry.find("author")
+    name = author.find("name") if author is not None else None
+    value = name.get_text(" ", strip=True) if name is not None else ""
+    match = re.search(r"/u/([A-Za-z0-9_-]+)", value)
+    return match.group(1) if match else None
+
+
+def _atom_body(entry) -> str | None:
+    content = entry.find("content")
+    if content is None:
+        return None
+    fragment = BeautifulSoup(content.get_text(), "lxml")
+    body = fragment.select_one("div.md")
+    if body is None:
+        return None
+    value = body.get_text(" ", strip=True)
+    return value or None
+
+
+def _atom_link(entry) -> str | None:
+    link = entry.find("link", recursive=False)
+    value = link.get("href") if link is not None else None
+    return value if isinstance(value, str) else None
+
+
+def _rss_next_url(page_url: str, fullname: str, row_count: int) -> str | None:
+    parsed = urlsplit(page_url)
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    limit = next((int(value) for key, value in pairs
+                  if key == "limit" and value.isdigit()), 25)
+    if row_count < limit:
+        return None
+    prior_count = next((int(value) for key, value in pairs
+                        if key == "count" and value.isdigit()), 0)
+    base = [(key, value) for key, value in pairs if key not in {"after", "count"}]
+    base.extend((("after", fullname), ("count", str(prior_count + row_count))))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(base), ""))
+
+
+def _rss_listing_rows(
+    html: str, page_url: str,
+) -> tuple[list[tuple[str, dict]], bool, str | None] | None:
+    if re.search(r"<(?:[A-Za-z0-9_-]+:)?feed(?:\s|>)", html) is not None:
+        try:
+            ET.fromstring(html)
+        except ET.ParseError:
+            _invalid_feed("Reddit returned malformed Atom XML")
+    soup = BeautifulSoup(html, "xml")
+    feed = soup.find("feed")
+    if feed is None:
+        return None
+    rows: list[tuple[str, dict]] = []
+    last_fullname = None
+    entries = feed.find_all("entry", recursive=False)
+    for entry in entries:
+        fullname_node = entry.find("id", recursive=False)
+        fullname = fullname_node.get_text(strip=True) if fullname_node is not None else ""
+        if re.fullmatch(r"t3_[a-z0-9]{5,12}", fullname) is None:
+            _invalid_feed("Reddit returned an invalid Atom post identifier")
+        raw_permalink = _atom_link(entry)
+        permalink = _canonical_permalink(raw_permalink)
+        title_node = entry.find("title", recursive=False)
+        title = title_node.get_text(" ", strip=True) if title_node is not None else ""
+        if permalink is None or not title:
+            _invalid_feed("Reddit returned an incomplete Atom post")
+        thread_id = fullname[3:]
+        if canonical_reddit_thread_id(permalink) != thread_id:
+            _invalid_feed("Reddit returned a mismatched Atom post")
+        category = entry.find("category", recursive=False)
+        updated = entry.find("updated", recursive=False)
+        row = {
+            "age": updated.get_text(strip=True) if updated is not None else None,
+            "author": _atom_author(entry),
+            "body": _atom_body(entry),
+            "commentCount": None,
+            "externalUrl": raw_permalink,
+            "id": thread_id,
+            "observedFullname": fullname,
+            "observedPermalink": raw_permalink,
+            "permalink": permalink,
+            "score": None,
+            "subreddit": category.get("term") if category is not None else None,
+            "surface": "syndication",
+            "title": title,
+            "capturePage": page_url,
+        }
+        rows.append((thread_id, row))
+        last_fullname = fullname
+    next_url = (
+        _rss_next_url(page_url, last_fullname, len(rows))
+        if last_fullname is not None else None
+    )
+    return rows, bool(entries), next_url
 
 
 def _listing_rows(html: str, page_url: str) -> tuple[list[tuple[str, dict]], bool, str | None]:
+    rss = _rss_listing_rows(html, page_url)
+    if rss is not None:
+        return rss
+    if urlsplit(page_url).path.endswith(".rss"):
+        _invalid_feed("Reddit feed response did not contain an Atom feed")
     soup = BeautifulSoup(html, "lxml")
     containers = soup.select("div.thing, div.search-result")
     rows: list[tuple[str, dict]] = []
@@ -459,6 +615,65 @@ def _listing_rows(html: str, page_url: str) -> tuple[list[tuple[str, dict]], boo
 def _thread_rows(
     html: str, thread_id: str, page_url: str,
 ) -> tuple[list[tuple[str, str, dict]], bool, int]:
+    if re.search(r"<(?:[A-Za-z0-9_-]+:)?feed(?:\s|>)", html) is not None:
+        try:
+            ET.fromstring(html)
+        except ET.ParseError:
+            _invalid_feed("Reddit returned malformed Atom XML")
+    feed = BeautifulSoup(html, "xml").find("feed")
+    if feed is not None:
+        rows: list[tuple[str, str, dict]] = []
+        comment_count = 0
+        entries = feed.find_all("entry", recursive=False)
+        if not entries:
+            return [], False, 0
+        first_id = entries[0].find("id", recursive=False)
+        if first_id is None or first_id.get_text(strip=True) != f"t3_{thread_id}":
+            _invalid_feed("Reddit thread feed did not begin with the requested post")
+        for entry_index, entry in enumerate(entries):
+            fullname_node = entry.find("id", recursive=False)
+            fullname = fullname_node.get_text(strip=True) if fullname_node is not None else ""
+            category = entry.find("category", recursive=False)
+            raw_permalink = _atom_link(entry)
+            if entry_index == 0 and fullname == f"t3_{thread_id}":
+                title_node = entry.find("title", recursive=False)
+                if (title_node is None or not title_node.get_text(" ", strip=True)
+                        or _observed_thread_id(raw_permalink) != thread_id):
+                    _invalid_feed("Reddit returned an incomplete Atom thread")
+                rows.append((thread_id, "thread", {
+                    "author": _atom_author(entry), "body": _atom_body(entry),
+                    "id": thread_id,
+                    "permalink": f"https://www.reddit.com/comments/{thread_id}/",
+                    "observedFullname": fullname,
+                    "observedPermalink": raw_permalink,
+                    "score": None,
+                    "subreddit": category.get("term") if category is not None else None,
+                    "surface": "syndication",
+                    "title": title_node.get_text(" ", strip=True) if title_node else None,
+                    "capturePage": page_url,
+                }))
+            elif re.fullmatch(r"t1_[a-z0-9]{1,12}", fullname):
+                body = _atom_body(entry)
+                if (not body or raw_permalink is None
+                        or not _observed_comment_matches(
+                            raw_permalink, thread_id, fullname[3:],
+                        )):
+                    _invalid_feed("Reddit returned an incomplete Atom comment")
+                comment_id = fullname[3:]
+                rows.append((comment_id, "comment", {
+                    "author": _atom_author(entry), "body": body, "depth": None,
+                    "id": comment_id, "parentId": None,
+                    "permalink": raw_permalink or f"https://www.reddit.com/comments/{thread_id}/",
+                    "observedFullname": fullname, "score": None,
+                    "surface": "syndication", "topLevel": None,
+                    "capturePage": page_url,
+                }))
+                comment_count += 1
+            else:
+                _invalid_feed("Reddit returned an invalid Atom thread entry")
+        return rows, bool(rows), comment_count
+    if urlsplit(page_url).path.endswith(".rss"):
+        _invalid_feed("Reddit thread response did not contain an Atom feed")
     soup = BeautifulSoup(html, "lxml")
     top = soup.select_one("div.thing.link")
     rows: list[tuple[str, str, dict]] = []
@@ -611,7 +826,7 @@ def _validate_page_url(operation: str, identity: str, initial_url: str, page_url
             "redirect-denied", f"Reddit page left its allowed origin (landed on {page_url})",
         )
     if operation == "thread":
-        if parsed.path != f"/comments/{identity}/" or parsed.query:
+        if parsed.path != initial.path or parsed.query != initial.query:
             raise RedditCaptureError(
                 "redirect-denied", f"Reddit page changed thread (landed on {page_url})",
             )
@@ -692,6 +907,7 @@ def capture_reddit_pages(
     ] = []
     gap = None
     saw_container = False
+    observed_thread_comments = 0
     final_url = cursor_url
     expected_url = cursor_url
     for page_index, page in enumerate(pages):
@@ -711,16 +927,26 @@ def capture_reddit_pages(
             page_chunks.append((page.url, [], None, True))
             break
         next_url = None
-        if request.operation.value == "thread":
-            rows, contained, _comment_count = _thread_rows(page.html, identity, page.url)
-        elif request.operation.value == "about":
-            about_rows, contained = _about_rows(page.html, identity, page.url)
-            rows = [(item_id, "community", row) for item_id, row in about_rows]
-        else:
-            listing_rows, contained, next_url = _listing_rows(page.html, page.url)
-            rows = [(item_id, "post", row) for item_id, row in listing_rows]
-            if next_url is not None:
-                _validate_page_url(request.operation.value, identity, initial_url, next_url)
+        try:
+            if request.operation.value == "thread":
+                rows, contained, observed_thread_comments = _thread_rows(
+                    page.html, identity, page.url,
+                )
+            elif request.operation.value == "about":
+                about_rows, contained = _about_rows(page.html, identity, page.url)
+                rows = [(item_id, "community", row) for item_id, row in about_rows]
+            else:
+                listing_rows, contained, next_url = _listing_rows(page.html, page.url)
+                rows = [(item_id, "post", row) for item_id, row in listing_rows]
+                if next_url is not None:
+                    _validate_page_url(request.operation.value, identity, initial_url, next_url)
+        except RedditCaptureError as error:
+            if error.code != "selector-drift":
+                raise
+            gap = CaptureGap(code=error.code, detail=str(error), locator=page.url)
+            page_chunks.append((page.url, [], None, True))
+            saw_container = True
+            break
         deduped_rows: list[tuple[str, str, dict]] = []
         seen: set[tuple[str, str]] = set()
         for identifier, record_type, row in rows:
@@ -794,11 +1020,12 @@ def capture_reddit_pages(
             continuation_limited = True
         elif continuation == request.continuation:
             continuation = None
-    more = continuation is not None or (
-        request.operation.value == "thread" and parameters.max_comments == 0
-        and any(record_type == "comment" for _identifier, record_type, _row in
-                (page_chunks[0][1] if page_chunks else ()))
+    thread_feed_saturated = request.operation.value == "thread" and (
+        (parameters.max_comments == 0 and observed_thread_comments > 0)
+        or (parameters.max_comments > 0 and observed_thread_comments
+            >= min(parameters.max_comments, 99))
     )
+    more = continuation is not None or thread_feed_saturated
     if gap is None and continuation_limited:
         gap = CaptureGap(
             code="continuation-limit",
@@ -941,15 +1168,31 @@ def acquire_reddit(
 
             def route_request(route):
                 nonlocal request_count
-                request_count += 1
+                is_navigation = getattr(route.request, "is_navigation_request", lambda: False)()
+                if native_transport and not is_navigation:
+                    if (request.operation.value != "about"
+                            or not allow_browser_subresource(
+                                route.request.method, route.request.url,
+                            )):
+                        route.abort()
+                        return
+                    request_count += 1
+                    if request_count > budgets.max_requests:
+                        route.abort()
+                        return
+                    route.continue_()
+                    return
                 if not allow_browser_request(
                     route.request.method, route.request.url,
-                    request_count=request_count, max_requests=budgets.max_requests,
+                    request_count=1, max_requests=1,
                 ):
                     route.abort()
                     return
-                is_navigation = getattr(route.request, "is_navigation_request", lambda: False)()
-                if is_navigation and not native_transport:
+                request_count += 1
+                if request_count > budgets.max_requests:
+                    route.abort()
+                    return
+                if is_navigation:
                     try:
                         _validate_page_url(request.operation.value, _identity, initial_url,
                                            route.request.url)
@@ -964,10 +1207,7 @@ def acquire_reddit(
                         boundary=public_boundary,
                     )
 
-            if native_transport:
-                page.route("**/*", _readonly_browser_route)
-            else:
-                page.route("**/*", route_request)
+            page.route("**/*", route_request)
             for _index in range(request.max_pages):
                 if cancelled and cancelled():
                     raise RedditCaptureError("execution-cancelled", "Reddit capture was cancelled")
@@ -979,7 +1219,10 @@ def acquire_reddit(
                 response = page.goto(url, wait_until=wait_until,
                                      timeout=budgets.timeout_seconds * 1000)
                 final_url = page.url
-                html = page.content()
+                html = (
+                    page.content() if request.operation.value == "about"
+                    else page.locator("body").inner_text()
+                )
                 status = response.status if response is not None else 200
                 if status >= 400:
                     raise RedditCaptureError(
@@ -1007,7 +1250,7 @@ def acquire_reddit(
         raise RedditCaptureError("browser-failed", "Reddit browser capture failed") from None
     capture = capture_reddit_pages(request, tuple(pages), captured_at=datetime.now(timezone.utc))
     capture = capture.model_copy(update={"settings_digest": settings_digest})
-    if cache is not None and capture.result.envelope.complete:
+    if cache is not None and _cacheable_capture(capture):
         _write_cache_optional(
             cache, cache_key, json.loads(capture.model_dump_json()),
             captured_at=capture.original_acquired_at.timestamp(),
