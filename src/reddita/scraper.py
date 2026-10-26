@@ -486,6 +486,30 @@ def _atom_link(entry) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _atom_external_url(entry, thread_id: str) -> str | None:
+    content = entry.find("content", recursive=False)
+    if content is None:
+        return None
+    fragment = BeautifulSoup(content.get_text(), "lxml")
+    for link in fragment.find_all("a", href=True):
+        if link.get_text(" ", strip=True).casefold() != "[link]":
+            continue
+        value = link.get("href")
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            continue
+        if (parsed.scheme not in {"http", "https"} or parsed.hostname is None
+                or parsed.username is not None or parsed.password is not None):
+            continue
+        if _observed_thread_id(value) == thread_id:
+            continue
+        return value
+    return None
+
+
 def _rss_next_url(page_url: str, fullname: str, row_count: int) -> str | None:
     parsed = urlsplit(page_url)
     pairs = parse_qsl(parsed.query, keep_blank_values=True)
@@ -536,7 +560,7 @@ def _rss_listing_rows(
             "author": _atom_author(entry),
             "body": _atom_body(entry),
             "commentCount": None,
-            "externalUrl": raw_permalink,
+            "externalUrl": _atom_external_url(entry, thread_id),
             "id": thread_id,
             "observedFullname": fullname,
             "observedPermalink": raw_permalink,
@@ -635,13 +659,15 @@ def _thread_rows(
             fullname = fullname_node.get_text(strip=True) if fullname_node is not None else ""
             category = entry.find("category", recursive=False)
             raw_permalink = _atom_link(entry)
+            updated = entry.find("updated", recursive=False)
+            age = updated.get_text(strip=True) if updated is not None else None
             if entry_index == 0 and fullname == f"t3_{thread_id}":
                 title_node = entry.find("title", recursive=False)
                 if (title_node is None or not title_node.get_text(" ", strip=True)
                         or _observed_thread_id(raw_permalink) != thread_id):
                     _invalid_feed("Reddit returned an incomplete Atom thread")
                 rows.append((thread_id, "thread", {
-                    "author": _atom_author(entry), "body": _atom_body(entry),
+                    "age": age, "author": _atom_author(entry), "body": _atom_body(entry),
                     "id": thread_id,
                     "permalink": f"https://www.reddit.com/comments/{thread_id}/",
                     "observedFullname": fullname,
@@ -661,7 +687,7 @@ def _thread_rows(
                     _invalid_feed("Reddit returned an incomplete Atom comment")
                 comment_id = fullname[3:]
                 rows.append((comment_id, "comment", {
-                    "author": _atom_author(entry), "body": body, "depth": None,
+                    "age": age, "author": _atom_author(entry), "body": body, "depth": None,
                     "id": comment_id, "parentId": None,
                     "permalink": raw_permalink or f"https://www.reddit.com/comments/{thread_id}/",
                     "observedFullname": fullname, "score": None,
@@ -1224,13 +1250,11 @@ def acquire_reddit(
                     else page.locator("body").inner_text()
                 )
                 status = response.status if response is not None else 200
-                if status >= 400:
-                    raise RedditCaptureError(
-                        "http-error", f"Reddit returned HTTP {status}"
-                    )
                 if native_transport:
                     network_budget.add(html.encode("utf-8"))
                 pages.append(RedditPage(url=final_url, html=html, status=status))
+                if status >= 400:
+                    break
                 if request.operation.value in {"thread", "about"}:
                     break
                 _rows, _contained, next_url = _listing_rows(html, final_url)

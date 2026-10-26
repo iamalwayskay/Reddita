@@ -8,10 +8,18 @@ It is deliberately read-only: the browser permits GET requests and aborts state-
 
 Requires Python 3.12+.
 
+On a clean Mac, install Python first. With Homebrew:
+
 ```bash
-git clone <repository-url>
-cd reddita
-python -m venv .venv
+brew install python@3.12
+```
+
+Without Homebrew, use the Python 3.12 macOS installer from [python.org](https://www.python.org/downloads/macos/).
+
+```bash
+git clone https://github.com/iamalwayskay/Reddita.git
+cd Reddita
+python3.12 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
 patchright install chromium
@@ -27,10 +35,10 @@ reddita thread https://www.reddit.com/r/python/comments/abc123/example/ 25
 reddita about python
 ```
 
-Add `--json` for machine-readable output. Add `--fresh` to bypass the private six-hour cache.
+Add `--json` for the stable results-only machine output. For research agents, prefer `--json-meta`: its top level reports completeness, gaps, acquisition time/mode, provenance, and a `results` payload. Always inspect `complete` and `gaps`. Add `--fresh` to bypass the private six-hour cache.
 
 ```bash
-reddita search "open source OCR" 10 --json > results.json
+reddita search "open source OCR" 10 --json-meta > results.json
 ```
 
 The command exits non-zero on invalid input, a denied network boundary, a browser failure, or an incomplete empty response. Reddit can change its HTML, return `403 Blocked`, or rate-limit unauthenticated requests by network/IP; the tool reports that rather than bypassing it. Treat captures as research evidence, not a guaranteed API.
@@ -41,7 +49,7 @@ Listing commands return up to 100 posts and automatically fetch the required 25-
 
 Share the repository URL and this prompt:
 
-> Install this repository following its README. Use `reddita ... --json` for public Reddit research. Let Reddita manage its own unauthenticated browser profile; never import a personal profile or add credentials, login automation, posting, voting, or private-content access. When integrating it, prefer the CLI for subprocess use or the documented Python API for in-process use.
+> Install this repository following its README. Use `reddita ... --json-meta` for public Reddit research, inspect `complete` and `gaps`, then analyze `results`. Let Reddita manage its own unauthenticated browser profile; never import a personal profile or add credentials, login automation, posting, voting, or private-content access. When integrating it, prefer the CLI for subprocess use or the documented Python API for in-process use.
 
 The repository also includes [docs/agent-guide.md](docs/agent-guide.md) and an `AGENTS.md` instruction file that coding agents discover automatically.
 
@@ -79,7 +87,7 @@ for record in capture.result.records:
     print(json.loads(record.data_json))
 ```
 
-`settings_digest` identifies the caller's effective settings for cache correctness. Use a stable SHA-256 hex digest in production. The CLI is the recommended interface because it creates and validates the private profile and cache directories automatically.
+`settings_digest` identifies the caller's effective settings for cache correctness. Use a stable SHA-256 hex digest in production. This minimal Python example is uncached because it does not pass a private cache descriptor. The CLI is the recommended interface because it creates and validates the private profile and cache directories automatically and caches repeat captures for six hours.
 
 ## Output model
 
@@ -108,7 +116,7 @@ python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
-The tests use local HTML fixtures and mocked acquisition; they do not depend on Reddit being reachable.
+The parser tests use local Atom/HTML fixtures and mocked Reddit acquisition; they do not depend on Reddit being reachable. CI additionally installs and launches real Chromium on Linux and an Apple Silicon macOS runner.
 
 ## License
 

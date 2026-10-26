@@ -9,11 +9,19 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -e .
+      - run: patchright install chromium
+      - run: uname -a
       - run: python -m unittest discover -s tests -v
+        env:
+          REDDITA_BROWSER_SMOKE: "1"

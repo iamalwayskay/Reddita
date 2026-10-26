@@ -30,4 +30,6 @@ The 2026-10-26 research verification replaced those blocked old-Reddit routes wi
 - navigation is validated before loading, research captures abort all subresources, and community pages can load only GET assets from `www.redditstatic.com`;
 - malformed or incomplete feeds fail closed, a thread feed must begin with its requested post, and a saturated feed is reported as partial rather than falsely complete;
 - Atom feeds do not provide vote or comment totals, so Reddita returns those metrics as unavailable rather than inventing zeroes.
-- 26 local tests pass, including malformed XML, invalid second pages, comment-only threads, feed saturation, URL boundaries, cache reuse, and strict CLI input.
+- 33 local tests pass with the browser smoke enabled, including malformed XML, invalid and HTTP-failing second pages, comment-only threads, feed saturation, external-link extraction, provenance, URL boundaries, cache reuse, and strict CLI input.
+
+The 2026-10-26 adversarial Mac/Claude pass added Apple Silicon CI with a real persistent Chromium launch, made the README executable on a clean Mac, added `--json-meta` completeness and typed gaps without breaking legacy `--json`, preserved outbound link-post URLs and thread-comment provenance, and stopped converting unavailable community activity into zero.

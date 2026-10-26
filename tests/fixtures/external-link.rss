@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>durable product - Reddit Search!</title>
+  <entry>
+    <author><name>/u/product_researcher</name></author>
+    <category term="BuyItForLife"/>
+    <content type="html">&lt;table&gt;&lt;tr&gt;&lt;td&gt;&lt;a href="https://www.reddit.com/r/BuyItForLife/comments/abc123/durable_chair/"&gt;&lt;img src="https://example.com/thumb.jpg" /&gt;&lt;/a&gt;&lt;/td&gt;&lt;td&gt;submitted by &lt;a href="https://www.reddit.com/user/product_researcher"&gt;/u/product_researcher&lt;/a&gt; to &lt;a href="https://www.reddit.com/r/BuyItForLife/"&gt;r/BuyItForLife&lt;/a&gt;&lt;br/&gt;&lt;a href="https://example.com/products/durable-chair"&gt;[link]&lt;/a&gt; &lt;a href="https://www.reddit.com/r/BuyItForLife/comments/abc123/durable_chair/"&gt;[comments]&lt;/a&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;</content>
+    <id>t3_abc123</id>
+    <link href="https://www.reddit.com/r/BuyItForLife/comments/abc123/durable_chair/"/>
+    <updated>2026-10-20T10:00:00+00:00</updated>
+    <title>A durable chair</title>
+  </entry>
+</feed>

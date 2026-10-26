@@ -81,6 +81,25 @@ class RedditaTests(unittest.TestCase):
         self.assertIsNone(rows[0]["commentCount"])
         self.assertIsNotNone(capture.result.envelope.continuation)
 
+    def test_link_post_preserves_its_external_destination(self):
+        request = SourceRequest(
+            source="reddit", operation="search", locator="durable product",
+            parameters_json='{"maxComments":100,"pageSize":25,"sort":"relevance"}',
+            max_records=25, max_pages=1,
+        )
+        capture = capture_reddit_pages(
+            request,
+            (RedditPage(
+                url=("https://www.reddit.com/search.rss?q=durable+product"
+                     "&type=link&limit=25"),
+                html=(FIXTURES / "external-link.rss").read_text(),
+            ),),
+            captured_at=NOW,
+        )
+        row = json.loads(capture.result.records[0].data_json)
+        self.assertEqual(row["externalUrl"], "https://example.com/products/durable-chair")
+        self.assertEqual(row["permalink"], "https://www.reddit.com/comments/abc123/")
+
     def test_invalid_or_truncated_search_feed_fails_closed(self):
         request = SourceRequest(
             source="reddit", operation="search", locator="best office chair back pain",
@@ -130,6 +149,61 @@ class RedditaTests(unittest.TestCase):
                 self.assertFalse(capture.result.envelope.complete)
                 self.assertEqual(len(capture.result.records), 2)
                 self.assertEqual(capture.result.envelope.gaps[0].code, "selector-drift")
+
+    def test_later_live_http_error_preserves_prior_page_evidence(self):
+        request = SourceRequest(
+            source="reddit", operation="search", locator="best office chair back pain",
+            parameters_json='{"maxComments":100,"pageSize":2,"sort":"relevance"}',
+            max_records=4, max_pages=2,
+        )
+        first_url = (
+            "https://www.reddit.com/search.rss?q=best+office+chair+back+pain"
+            "&type=link&limit=2"
+        )
+        second_url = first_url + "&after=t3_1x0exqu&count=2"
+        responses = [
+            (first_url, (FIXTURES / "search.rss").read_text(), 200),
+            (second_url, "rate limited", 429),
+        ]
+
+        class Page:
+            def __init__(self):
+                self.url = "about:blank"
+                self.html = ""
+
+            def route(self, *_args):
+                return None
+
+            def goto(self, url, **_kwargs):
+                expected, self.html, status = responses.pop(0)
+                self.url = url
+                if url != expected:
+                    raise AssertionError(f"unexpected page {url}")
+                return SimpleNamespace(status=status)
+
+            def locator(self, _selector):
+                return SimpleNamespace(inner_text=lambda: self.html)
+
+        page = Page()
+        context = SimpleNamespace(new_page=lambda: page, close=lambda: None)
+        class PlaywrightContext:
+            def __enter__(self):
+                return SimpleNamespace()
+
+            def __exit__(self, *_args):
+                return None
+
+        playwright_context = PlaywrightContext()
+        with patch("patchright.sync_api.sync_playwright", return_value=playwright_context), patch.object(
+            scraper_module, "_open_browser_context", return_value=(context, None),
+        ), patch.object(scraper_module.time, "sleep", return_value=None):
+            capture = scraper_module.acquire_reddit(
+                request, budgets=SourceBudgets(), settings_digest="a" * 64,
+                profile_root=None, native_transport=True,
+            )
+        self.assertEqual(len(capture.result.records), 2)
+        self.assertFalse(capture.result.envelope.complete)
+        self.assertEqual(capture.result.envelope.gaps[0].code, "http-error")
 
     def test_bounded_partial_research_capture_is_reused_from_cache(self):
         captured_at = datetime.now(timezone.utc)
@@ -195,6 +269,13 @@ class RedditaTests(unittest.TestCase):
         legacy = cli_module._legacy(capture, "thread")
         self.assertIsNone(legacy["post"]["score"])
         self.assertIsNone(legacy["comments"][0]["score"])
+        self.assertEqual(legacy["post"]["permalink"], "https://www.reddit.com/comments/16fqhts/")
+        self.assertEqual(legacy["comments"][0]["id"], "k07805h")
+        self.assertEqual(
+            legacy["comments"][0]["permalink"],
+            "https://www.reddit.com/r/bunions/comments/16fqhts/what_is_bunion_pain_like/k07805h/",
+        )
+        self.assertEqual(legacy["comments"][0]["age"], "2023-09-12T02:03:08+00:00")
         self.assertFalse(capture.result.envelope.complete)
         self.assertEqual(capture.result.envelope.gaps[0].code, "comment-limit")
 
@@ -245,6 +326,51 @@ class RedditaTests(unittest.TestCase):
             captured_at=NOW,
         )
         self.assertTrue(capture.result.envelope.complete)
+
+    def test_about_missing_activity_metrics_remain_unknown(self):
+        request = SourceRequest(
+            source="reddit", operation="about", locator="python",
+            parameters_json='{"maxComments":100,"pageSize":1}',
+            max_records=1, max_pages=1,
+        )
+        capture = capture_reddit_pages(
+            request,
+            (RedditPage(
+                url="https://www.reddit.com/r/python/",
+                html='<shreddit-subreddit-header prefixed-name="r/python" />',
+            ),),
+            captured_at=NOW,
+        )
+        data = cli_module._legacy(capture, "about")
+        self.assertIsNone(data["weekly_active_users"])
+        self.assertIsNone(data["weekly_contributions"])
+
+    def test_about_human_output_marks_missing_activity_unknown(self):
+        request = SourceRequest(
+            source="reddit", operation="about", locator="python",
+            parameters_json='{"maxComments":100,"pageSize":1}',
+            max_records=1, max_pages=1,
+        )
+        capture = capture_reddit_pages(
+            request,
+            (RedditPage(
+                url="https://www.reddit.com/r/python/",
+                html='<shreddit-subreddit-header prefixed-name="r/python" />',
+            ),),
+            captured_at=NOW,
+        )
+        stdout = StringIO()
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            with redirect_stdout(stdout):
+                code = main(
+                    ["about", "python", "--fresh"],
+                    acquire=lambda *_args, **_kwargs: capture,
+                    cache_root=Path(directory) / "cache",
+                    profile_root=Path(directory) / "profile",
+                )
+        self.assertEqual(code, 0)
+        self.assertIn("? weekly active users", stdout.getvalue())
+        self.assertIn("? weekly posts+comments", stdout.getvalue())
 
     def test_redirect_error_reports_the_landed_on_url(self):
         landed_on = (
@@ -500,6 +626,44 @@ class RedditaTests(unittest.TestCase):
         self.assertEqual(observed["request"].max_pages, 3)
         self.assertEqual(observed["profile"], Path(directory) / "profile")
         self.assertTrue(observed["native_transport"])
+
+    def test_cli_json_exposes_partial_capture_metadata(self):
+        request = SourceRequest(
+            source="reddit", operation="search", locator="best office chair back pain",
+            parameters_json='{"maxComments":100,"pageSize":2,"sort":"relevance"}',
+            max_records=1, max_pages=1,
+        )
+        capture = capture_reddit_pages(
+            request,
+            (RedditPage(
+                url=("https://www.reddit.com/search.rss?q=best+office+chair+back+pain"
+                     "&type=link&limit=2"),
+                html=(FIXTURES / "search.rss").read_text(),
+            ),),
+            captured_at=NOW,
+        )
+        stdout, stderr = StringIO(), StringIO()
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(
+                    ["search", "best office chair back pain", "1", "--json-meta", "--fresh"],
+                    acquire=lambda *_args, **_kwargs: capture,
+                    cache_root=Path(directory) / "cache",
+                    profile_root=Path(directory) / "profile",
+                )
+        document = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertFalse(document["complete"])
+        self.assertEqual(document["gaps"][0]["code"], "record-limit")
+        self.assertEqual(len(document["results"]), 1)
+        self.assertIn("partial", stderr.getvalue())
+
+    def test_help_is_a_successful_stdout_command(self):
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            code = main(["--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("Usage:", stdout.getvalue())
 
     def test_human_output_marks_unavailable_feed_metrics_as_unknown(self):
         stdout = StringIO()

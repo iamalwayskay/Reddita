@@ -8,10 +8,11 @@ Usage:
   reddita about <subreddit>                community metadata
 
 Flags:
-  --json     full JSON output
-  --fresh    bypass the 6h disk cache
-  --new      sort by new instead of relevance/hot
-  --top      sort by top (all-time) — search/sub only
+  --json       stable results-only JSON output
+  --json-meta  JSON with completeness, gaps, provenance, and results
+  --fresh      bypass the 6h disk cache
+  --new        sort by new instead of relevance/hot
+  --top        sort by top (all-time) — search/sub only
 
 The tool reads public Reddit feeds and community pages through an unauthenticated,
 persistent, GET-only browser profile at ~/.local/share/reddita/browser-profile/.
@@ -66,28 +67,44 @@ def _legacy(capture, operation: str):
         post = next((row for kind, row in rows if kind == "thread"), {})
         comments = [row for kind, row in rows if kind == "comment"]
         permalink = post.get("permalink") or ""
-        requested_locator = capture.result.envelope.requested_locator
-        if requested_locator.startswith("http"):
-            permalink = requested_locator.replace("www.reddit.com", "old.reddit.com")
         return {
             "post": {
+                "id": post.get("id"), "age": post.get("age"),
                 "title": post.get("title"), "subreddit": post.get("subreddit") or "?",
                 "score": post.get("score"), "author": post.get("author") or "?",
                 "body": post.get("body") or "",
                 "permalink": permalink,
             },
             "comments": [{
+                "id": row.get("id"), "age": row.get("age"),
                 "author": row.get("author") or "?", "score": row.get("score"),
-                "body": row.get("body") or "",
+                "body": row.get("body") or "", "permalink": row.get("permalink"),
+                "parentId": row.get("parentId"), "depth": row.get("depth"),
+                "topLevel": row.get("topLevel"),
             } for row in comments],
         }
     row = next((row for kind, row in rows if kind == "community"), {})
     return {
         "subreddit": f"r/{row.get('subreddit', '')}",
         "title": row.get("displayName") or "",
-        "weekly_active_users": row.get("weeklyActiveUsers") or 0,
-        "weekly_contributions": row.get("weeklyContributions") or 0,
+        "weekly_active_users": row.get("weeklyActiveUsers"),
+        "weekly_contributions": row.get("weeklyContributions"),
         "description": row.get("description") or "",
+    }
+
+
+def _json_document(capture, operation: str) -> dict:
+    envelope = capture.result.envelope
+    return {
+        "complete": envelope.complete,
+        "gaps": [gap.model_dump(mode="json") for gap in envelope.gaps],
+        "continuation": envelope.continuation,
+        "capturedAt": envelope.captured_at.isoformat(),
+        "acquisitionMode": capture.acquisition_mode,
+        "requestedLocator": envelope.requested_locator,
+        "finalLocator": envelope.final_locator,
+        "recordCount": envelope.record_count,
+        "results": _legacy(capture, operation),
     }
 
 
@@ -108,11 +125,16 @@ def main(
     profile_root: Path = DEFAULT_PROFILE,
 ) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
-    known_flags = {"--json", "--fresh", "--new", "--top"}
+    if raw in (["--help"], ["-h"]):
+        print(__doc__)
+        return 0
+    known_flags = {"--json", "--json-meta", "--fresh", "--new", "--top"}
     supplied_flags = {argument for argument in raw if argument.startswith("--")}
-    if supplied_flags - known_flags or {"--new", "--top"} <= supplied_flags:
+    if (supplied_flags - known_flags or {"--new", "--top"} <= supplied_flags
+            or {"--json", "--json-meta"} <= supplied_flags):
         raise SystemExit(__doc__)
     json_output = "--json" in raw
+    json_meta_output = "--json-meta" in raw
     fresh = "--fresh" in raw
     sort = "new" if "--new" in raw else "top" if "--top" in raw else None
     args = [argument for argument in raw if not argument.startswith("--")]
@@ -188,7 +210,9 @@ def main(
         print(f"warning: Reddit capture is partial — {details}", file=sys.stderr)
 
     data = _legacy(capture, operation)
-    if json_output:
+    if json_meta_output:
+        print(json.dumps(_json_document(capture, operation), indent=2))
+    elif json_output:
         print(json.dumps(data, indent=2))
     elif operation in {"search", "subreddit", "subreddit-search"}:
         _print_posts(data)
@@ -206,9 +230,17 @@ def main(
             print(f"[{score}▲ u/{comment['author']}] {comment['body'][:500]}\n")
     else:
         print(f"{data['subreddit']} — {data['title']}")
+        weekly_active = (
+            "?" if data["weekly_active_users"] is None
+            else f"{data['weekly_active_users']:,}"
+        )
+        weekly_contributions = (
+            "?" if data["weekly_contributions"] is None
+            else f"{data['weekly_contributions']:,}"
+        )
         print(
-            f"{data['weekly_active_users']:,} weekly active users · "
-            f"{data['weekly_contributions']:,} weekly posts+comments"
+            f"{weekly_active} weekly active users · "
+            f"{weekly_contributions} weekly posts+comments"
         )
         print(data["description"])
     return 0
