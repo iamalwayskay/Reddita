@@ -9,9 +9,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import random
 import re
 import stat
+import subprocess
+import sys
 import time
 from typing import Literal
 from urllib.parse import parse_qsl, urlencode, unquote, urlsplit
@@ -508,7 +511,10 @@ def _about_rows(html: str, subreddit: str, page_url: str) -> tuple[list[tuple[st
     prefixed = header.get("prefixed-name") or f"r/{subreddit}"
     actual = prefixed[2:] if prefixed.startswith("r/") else prefixed
     if actual.casefold() != subreddit.casefold():
-        raise RedditCaptureError("redirect-denied", "Reddit community metadata changed subreddit")
+        raise RedditCaptureError(
+            "redirect-denied",
+            f"Reddit community metadata changed subreddit (landed on {page_url})",
+        )
     row = {
         "description": (header.get("description") or "").strip() or None,
         "displayName": header.get("display-name") or None,
@@ -590,34 +596,53 @@ def _validate_page_url(operation: str, identity: str, initial_url: str, page_url
     try:
         parsed = urlsplit(page_url)
         initial = urlsplit(initial_url)
+        left_origin = (
+            parsed.scheme != "https" or parsed.hostname != initial.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.port is not None or parsed.fragment
+            or unquote(parsed.path) != parsed.path or ".." in parsed.path.split("/")
+        )
     except ValueError as error:
-        raise RedditCaptureError("redirect-denied", "Reddit page URL is invalid") from error
-    if (parsed.scheme != "https" or parsed.hostname != initial.hostname
-            or parsed.username is not None or parsed.password is not None or parsed.port is not None
-            or parsed.fragment or unquote(parsed.path) != parsed.path
-            or ".." in parsed.path.split("/")):
-        raise RedditCaptureError("redirect-denied", "Reddit page left its allowed origin")
+        raise RedditCaptureError(
+            "redirect-denied", f"Reddit page URL is invalid (landed on {page_url})",
+        ) from error
+    if left_origin:
+        raise RedditCaptureError(
+            "redirect-denied", f"Reddit page left its allowed origin (landed on {page_url})",
+        )
     if operation == "thread":
         if parsed.path != f"/comments/{identity}/" or parsed.query:
-            raise RedditCaptureError("redirect-denied", "Reddit page changed thread")
+            raise RedditCaptureError(
+                "redirect-denied", f"Reddit page changed thread (landed on {page_url})",
+            )
     elif operation == "about":
         if parsed.path.casefold() != f"/r/{identity}/".casefold() or parsed.query:
-            raise RedditCaptureError("redirect-denied", "Reddit page changed subreddit")
+            raise RedditCaptureError(
+                "redirect-denied", f"Reddit page changed subreddit (landed on {page_url})",
+            )
     elif operation == "subreddit":
         expected = parse_qsl(initial.query, keep_blank_values=True)
         actual = parse_qsl(parsed.query, keep_blank_values=True)
         if (parsed.path != initial.path or actual[:len(expected)] != expected
                 or urlencode(actual) != parsed.query
                 or not _valid_cursor_pairs(actual[len(expected):])):
-            raise RedditCaptureError("redirect-denied", "Reddit page changed subreddit listing")
+            raise RedditCaptureError(
+                "redirect-denied",
+                f"Reddit page changed subreddit listing (landed on {page_url})",
+            )
     else:
         expected = parse_qsl(initial.query, keep_blank_values=True)
         actual = parse_qsl(parsed.query, keep_blank_values=True)
         if (parsed.path != initial.path or actual[:len(expected)] != expected
                 or urlencode(actual) != parsed.query):
-            raise RedditCaptureError("redirect-denied", "Reddit page changed search")
+            raise RedditCaptureError(
+                "redirect-denied", f"Reddit page changed search (landed on {page_url})",
+            )
         if not _valid_cursor_pairs(actual[len(expected):]):
-            raise RedditCaptureError("redirect-denied", "Reddit search added an unapproved parameter")
+            raise RedditCaptureError(
+                "redirect-denied",
+                f"Reddit search added an unapproved parameter (landed on {page_url})",
+            )
 
 
 def _valid_cursor_pairs(pairs: list[tuple[str, str]]) -> bool:
@@ -674,7 +699,10 @@ def capture_reddit_pages(
             raise RedditCaptureError("byte-limit", "Reddit page exceeds its byte limit")
         _validate_page_url(request.operation.value, identity, initial_url, page.url)
         if page.url != expected_url and request.operation.value != "about":
-            raise RedditCaptureError("redirect-denied", "Reddit pages are not a canonical cursor chain")
+            raise RedditCaptureError(
+                "redirect-denied",
+                f"Reddit pages are not a canonical cursor chain (landed on {page.url})",
+            )
         final_url = page.url
         gap = _wall_gap(page)
         if gap:
@@ -704,7 +732,10 @@ def capture_reddit_pages(
         saw_container = saw_container or contained
         if page_index + 1 < len(pages):
             if next_url is None:
-                raise RedditCaptureError("redirect-denied", "Reddit returned an unrequested page")
+                raise RedditCaptureError(
+                    "redirect-denied",
+                    f"Reddit returned an unrequested page (landed on {pages[page_index + 1].url})",
+                )
             expected_url = next_url
 
     capacity = min(request.max_records, request.max_pages * parameters.page_size)
@@ -821,20 +852,46 @@ def capture_reddit_pages(
     )
 
 
+def _matching_user_agent(playwright) -> str | None:
+    """Return a Chrome user agent matching this OS and Patchright's Chromium."""
+    try:
+        executable = playwright.chromium.executable_path
+        if not isinstance(executable, str) or not executable:
+            return None
+        output = subprocess.run(
+            [executable, "--version"], capture_output=True, text=True, timeout=10,
+        ).stdout
+        match = re.search(r"(\d+)\.\d+\.\d+", output)
+        if match is None:
+            return None
+        major = match.group(1)
+    except Exception:
+        return None
+    if sys.platform == "darwin":
+        os_part = "Macintosh; Intel Mac OS X 10_15_7"
+    elif sys.platform.startswith("win"):
+        os_part = "Windows NT 10.0; Win64; x64"
+    else:
+        os_part = f"X11; Linux {platform.machine() or 'x86_64'}"
+    return (
+        f"Mozilla/5.0 ({os_part}) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    )
+
+
 def _open_browser_context(playwright, *, profile_root: Path | None, allow_stealth: bool):
     """Open the original persistent Reddit browser, or an isolated API context."""
     launch_options = {"headless": True}
     if allow_stealth:
         launch_options["args"] = ["--disable-blink-features=AutomationControlled"]
     context_options = {
-        "user_agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ),
         "locale": "en-US",
         "timezone_id": "UTC",
         "viewport": {"width": 1366, "height": 900},
     }
+    user_agent = _matching_user_agent(playwright)
+    if user_agent is not None:
+        context_options["user_agent"] = user_agent
     if profile_root is not None:
         context = playwright.chromium.launch_persistent_context(
             str(profile_root), **launch_options, **context_options,

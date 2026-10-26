@@ -5,15 +5,18 @@ from datetime import datetime, timezone
 from io import StringIO
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from reddita import SourceRequest, SourceResult
 from reddita.cli import main
 from reddita.contract import RedditContractError, normalize_reddit_request
 from reddita.models import CaptureEnvelope, CaptureGap
-from reddita.scraper import RedditPage, capture_reddit_pages
+from reddita.scraper import RedditCaptureError, RedditPage, capture_reddit_pages
 from reddita.scraper import allow_browser_request
 from reddita.scraper import _validate_page_url
 import reddita.scraper as scraper_module
@@ -65,6 +68,49 @@ class RedditaTests(unittest.TestCase):
         )
         self.assertTrue(capture.result.envelope.complete)
 
+    def test_redirect_error_reports_the_landed_on_url(self):
+        landed_on = (
+            "https://old.reddit.com/login/?reason=lor2&"
+            "dest=https%3A%2F%2Fold.reddit.com%2Fsearch%3Fq%3Dbunion%2Bpain"
+        )
+        with self.assertRaises(RedditCaptureError) as caught:
+            _validate_page_url(
+                "search", "bunion pain",
+                "https://old.reddit.com/search?q=bunion+pain", landed_on,
+            )
+        self.assertEqual(caught.exception.code, "redirect-denied")
+        self.assertIn(f"landed on {landed_on}", str(caught.exception))
+
+    def test_cross_origin_redirect_error_reports_the_landed_on_url(self):
+        landed_on = "https://www.reddit.com/login/?reason=lor2"
+        with self.assertRaises(RedditCaptureError) as caught:
+            _validate_page_url(
+                "search", "bunion pain",
+                "https://old.reddit.com/search?q=bunion+pain", landed_on,
+            )
+        self.assertEqual(caught.exception.code, "redirect-denied")
+        self.assertIn(f"landed on {landed_on}", str(caught.exception))
+
+    def test_malformed_redirect_is_typed_and_reports_the_landed_on_url(self):
+        landed_on = "https://old.reddit.com:invalid/search?q=bunion+pain"
+        with self.assertRaises(RedditCaptureError) as caught:
+            _validate_page_url(
+                "search", "bunion pain",
+                "https://old.reddit.com/search?q=bunion+pain", landed_on,
+            )
+        self.assertEqual(caught.exception.code, "redirect-denied")
+        self.assertIn(f"landed on {landed_on}", str(caught.exception))
+
+    def test_unapproved_search_parameter_reports_the_landed_on_url(self):
+        landed_on = "https://old.reddit.com/search?q=bunion+pain&after=not-a-post"
+        with self.assertRaises(RedditCaptureError) as caught:
+            _validate_page_url(
+                "search", "bunion pain",
+                "https://old.reddit.com/search?q=bunion+pain", landed_on,
+            )
+        self.assertEqual(caught.exception.code, "redirect-denied")
+        self.assertIn(f"landed on {landed_on}", str(caught.exception))
+
     def test_browser_boundary_is_get_only_and_reddit_only(self):
         self.assertTrue(allow_browser_request(
             "GET", "https://old.reddit.com/r/python/",
@@ -114,6 +160,45 @@ class RedditaTests(unittest.TestCase):
         path, options = chromium.persistent
         self.assertEqual(path, "/tmp/reddita-profile")
         self.assertIn("--disable-blink-features=AutomationControlled", options["args"])
+
+    def test_browser_user_agent_matches_platform_and_chromium_major(self):
+        class Chromium:
+            executable_path = "/fake/chrome"
+
+            def launch_persistent_context(self, _path, **kwargs):
+                self.options = kwargs
+                return "persistent-context"
+
+        chromium = Chromium()
+        version = SimpleNamespace(stdout="Google Chrome for Testing 156.0.8078.4\n")
+        with patch.object(sys, "platform", "darwin"), patch.object(
+            subprocess, "run", return_value=version,
+        ):
+            scraper_module._open_browser_context(
+                SimpleNamespace(chromium=chromium),
+                profile_root=Path("/private/reddita-profile"),
+                allow_stealth=True,
+            )
+        user_agent = chromium.options["user_agent"]
+        self.assertIn("Macintosh; Intel Mac OS X 10_15_7", user_agent)
+        self.assertIn("Chrome/156.0.0.0", user_agent)
+
+    def test_failed_version_probe_keeps_chromiums_native_user_agent(self):
+        class Chromium:
+            executable_path = "/missing/chrome"
+
+            def launch_persistent_context(self, _path, **kwargs):
+                self.options = kwargs
+                return "persistent-context"
+
+        chromium = Chromium()
+        with patch.object(subprocess, "run", side_effect=OSError("missing")):
+            scraper_module._open_browser_context(
+                SimpleNamespace(chromium=chromium),
+                profile_root=Path("/private/reddita-profile"),
+                allow_stealth=True,
+            )
+        self.assertNotIn("user_agent", chromium.options)
 
     def test_persistent_browser_allows_get_and_aborts_state_changing_methods(self):
         policy = getattr(scraper_module, "_readonly_browser_route", None)
@@ -208,7 +293,7 @@ class RedditaTests(unittest.TestCase):
             return capture
 
         stdout, stderr = StringIO(), StringIO()
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             with redirect_stdout(stdout), redirect_stderr(stderr):
                 code = main(
                     ["search", "fixture", "1", "--json"],
@@ -237,7 +322,7 @@ class RedditaTests(unittest.TestCase):
             ),
             records=(), pages=(),
         ))
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             with self.assertRaises(SystemExit) as caught:
                 main(
                     ["about", "python", "--json", "--fresh"],
